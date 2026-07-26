@@ -5,6 +5,7 @@ description = "MCP server for listing Viking portfolios and downloading portfoli
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "cryptography>=45,<48",
     "mcp>=1.27,<2",
     "pydantic-settings>=2.5,<3",
     "uvicorn>=0.31,<1",
