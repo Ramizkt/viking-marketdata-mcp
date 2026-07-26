@@ -49,8 +49,9 @@ async def setup_page(request: Request) -> HTMLResponse:
     <p>Файл хранится только на вашем компьютере. API key защищён Windows DPAPI и
        расшифровывается только под вашей учётной записью. Файл читает launcher, а не модель.</p>
     <ol>
-      <li><a href="{escape(save_script)}">Скачайте save-viking-credentials.ps1</a> и
-          <a href="{escape(file_script)}">viking-file.ps1</a> в одну папку.</li>
+      <li><a href="{escape(save_script)}">Скачайте save-viking-credentials.ps1</a>,
+          <a href="{escape(file_script)}">viking-file.ps1</a> и
+          <a href="{escape(session_script)}">viking-session.ps1</a> в одну папку.</li>
       <li>Один раз создайте файл:
         <pre>powershell -ExecutionPolicy Bypass -File .\\save-viking-credentials.ps1</pre>
       </li>
