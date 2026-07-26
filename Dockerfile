@@ -9,6 +9,7 @@ WORKDIR /app
 
 COPY pyproject.toml README.md ./
 COPY app ./app
+COPY client ./client
 
 RUN pip install --no-cache-dir .
 
@@ -17,4 +18,3 @@ RUN mkdir -p /data/exports
 EXPOSE 8000
 
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]
-
