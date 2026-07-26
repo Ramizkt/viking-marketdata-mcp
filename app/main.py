@@ -5,24 +5,20 @@ import logging
 from datetime import datetime
 from typing import Annotated, Any
 
+from mcp.server.auth.middleware.auth_context import get_access_token
+from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, ResourceLink, TextContent, ToolAnnotations
-from pydantic import AnyUrl, Field
+from pydantic import AnyHttpUrl, AnyUrl, Field
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
 
 from app.config import get_settings
-from app.credentials import (
-    REQUIRED_HEADERS,
-    credentials_from_scope,
-    require_request_credentials,
-    reset_request_credentials,
-    set_request_credentials,
-)
 from app.export_store import ExportStore
-from app.onboarding import client_script, setup_page
+from app.oauth import OAUTH_SCOPE, VikingOAuthProvider
+from app.onboarding import setup_page
 from app.service import Aggregation, Delivery, MarketDataService
 from app.viking_client import VikingAPIError, VikingClientPool
 
@@ -35,17 +31,33 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 viking_clients = VikingClientPool(settings)
 export_store = ExportStore(settings)
+oauth_provider = VikingOAuthProvider(settings)
+
+issuer_url = AnyHttpUrl(settings.resolved_public_base_url)
+resource_url = AnyHttpUrl(f"{settings.resolved_public_base_url}/mcp")
 
 mcp = FastMCP(
     "Viking Market Data",
     instructions=(
-        "Если Viking credentials ещё не настроены, вызови credential_setup и покажи пользователю "
-        "два локальных режима. Никогда не проси вставить API key в чат. После настройки сначала "
-        "вызывай list_available_portfolios. Для выгрузки выбирай портфель с "
+        "Пользователь уже прошёл безопасную браузерную OAuth-авторизацию. Никогда не проси "
+        "email или API key в чате. Сначала вызывай list_available_portfolios. "
+        "Для выгрузки выбирай портфель с "
         "history_available=true. В get_portfolio_data даты всегда передавай с часовым поясом. "
         "Используй delivery=auto: небольшие выборки вернутся inline, большие — CSV-файлом. "
         "Если пользователь не назвал поля, используй buy, sell и pos. Сервер только читает данные. "
-        "Credentials передаются только из локального MCP-клиента в HTTPS-заголовках."
+        "Credentials не входят в аргументы MCP-инструментов."
+    ),
+    auth_server_provider=oauth_provider,
+    auth=AuthSettings(
+        issuer_url=issuer_url,
+        service_documentation_url=AnyHttpUrl(f"{settings.resolved_public_base_url}/setup"),
+        client_registration_options=ClientRegistrationOptions(
+            enabled=True,
+            valid_scopes=[OAUTH_SCOPE],
+            default_scopes=[OAUTH_SCOPE],
+        ),
+        required_scopes=[OAUTH_SCOPE],
+        resource_server_url=resource_url,
     ),
     host="0.0.0.0",
     port=settings.port,
@@ -63,39 +75,13 @@ READ_ONLY = ToolAnnotations(
 
 
 def _service_for_request() -> MarketDataService:
-    credentials = require_request_credentials()
+    access_token = get_access_token()
+    if access_token is None:
+        raise RuntimeError("OAuth authorization is required.")
+    credentials = oauth_provider.credentials_for_access_token(access_token.token)
+    if credentials is None:
+        raise RuntimeError("OAuth session is invalid or expired. Authenticate again.")
     return MarketDataService(settings, viking_clients.get(credentials), export_store)
-
-
-@mcp.tool(
-    title="Настройка Viking credentials",
-    description=(
-        "Возвращает безопасные варианты настройки credentials. Вызывай этот инструмент, "
-        "если credentials отсутствуют. Не проси пользователя передавать API key в чат."
-    ),
-    annotations=READ_ONLY,
-)
-async def credential_setup() -> dict[str, Any]:
-    base_url = settings.resolved_public_base_url
-    return {
-        "status": "setup_required",
-        "message": "Выберите один из двух локальных режимов. API key не нужно отправлять агенту.",
-        "setup_url": f"{base_url}/setup",
-        "modes": [
-            {
-                "id": "temporary_session",
-                "title": "Только текущая сессия",
-                "storage": "RAM only",
-                "expires": "Через 15 минут без запросов или при перезапуске Railway",
-            },
-            {
-                "id": "encrypted_local_file",
-                "title": "Зашифрованный локальный файл",
-                "storage": "Windows DPAPI, только на компьютере пользователя",
-                "server_storage": False,
-            },
-        ],
-    }
 
 
 @mcp.tool(
@@ -174,9 +160,9 @@ async def health(_: Request) -> JSONResponse:
             "status": "ok",
             "service": "viking-marketdata-mcp",
             "mcp_path": "/mcp",
-            "credential_modes": ["temporary_session", "encrypted_local_file"],
-            "server_credentials_stored": False,
-            "required_mcp_headers": list(REQUIRED_HEADERS),
+            "oauth_required": True,
+            "credential_modes": ["session", "local_encrypted_token"],
+            "persistent_user_database": False,
             "setup_path": "/setup",
         }
     )
@@ -195,24 +181,6 @@ async def download(request: Request):
     return FileResponse(path, media_type="text/csv", filename=filename.split("--", 1)[-1])
 
 
-class VikingCredentialsMiddleware:
-    """Attach optional caller-supplied Viking credentials to each MCP request."""
-
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] == "http" and scope.get("path", "").startswith("/mcp"):
-            credentials, _ = credentials_from_scope(scope)
-            token = set_request_credentials(credentials)
-            try:
-                await self.app(scope, receive, send)
-            finally:
-                reset_request_credentials(token)
-            return
-        await self.app(scope, receive, send)
-
-
 _mcp_http_app = mcp.streamable_http_app()
 
 
@@ -220,7 +188,9 @@ _mcp_http_app = mcp.streamable_http_app()
 async def lifespan(_: Starlette):
     async with mcp.session_manager.run():
         viking_clients.start()
+        oauth_provider.start()
         yield
+    await oauth_provider.close()
     await viking_clients.close()
 
 
@@ -228,13 +198,17 @@ _starlette_app = Starlette(
     routes=[
         Route("/health", health, methods=["GET"]),
         Route("/setup", setup_page, methods=["GET"]),
-        Route("/client/windows/{filename:str}", client_script, methods=["GET"]),
+        Route(
+            "/oauth/connect/{pending_id:str}",
+            oauth_provider.connect_page,
+            methods=["GET", "POST"],
+        ),
         Route("/downloads/{filename:str}", download, methods=["GET"]),
         Mount("/", app=_mcp_http_app),
     ],
     lifespan=lifespan,
 )
-app = VikingCredentialsMiddleware(_starlette_app)
+app = _starlette_app
 
 
 def run() -> None:
