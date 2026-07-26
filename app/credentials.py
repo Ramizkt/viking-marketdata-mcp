@@ -30,6 +30,13 @@ _request_credentials: ContextVar[VikingCredentials | None] = ContextVar(
     default=None,
 )
 
+SETUP_REQUIRED_MESSAGE = (
+    "Viking credentials are not configured. Choose one local mode: "
+    "(1) temporary session — credentials stay only in RAM until Codex closes; "
+    "(2) encrypted local file — the local launcher reads it and sends HTTP headers. "
+    "Open the server /setup page for exact instructions. Never paste the API key into chat."
+)
+
 
 def credentials_from_scope(scope: dict[str, Any]) -> tuple[VikingCredentials | None, list[str]]:
     headers = Headers(scope=scope)
@@ -51,7 +58,7 @@ def credentials_from_scope(scope: dict[str, Any]) -> tuple[VikingCredentials | N
     )
 
 
-def set_request_credentials(credentials: VikingCredentials):
+def set_request_credentials(credentials: VikingCredentials | None):
     return _request_credentials.set(credentials)
 
 
@@ -62,8 +69,5 @@ def reset_request_credentials(token) -> None:
 def require_request_credentials() -> VikingCredentials:
     credentials = _request_credentials.get()
     if credentials is None:
-        raise RuntimeError(
-            "Viking credentials are missing. Configure X-Viking-Email, "
-            "X-Viking-API-Key and X-Viking-Role HTTP headers in the MCP client."
-        )
+        raise RuntimeError(SETUP_REQUIRED_MESSAGE)
     return credentials
