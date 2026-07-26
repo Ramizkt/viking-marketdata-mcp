@@ -20,7 +20,7 @@ from app.export_store import ExportStore
 from app.oauth import OAUTH_SCOPE, VikingOAuthProvider
 from app.onboarding import setup_page
 from app.service import Aggregation, Delivery, MarketDataService
-from app.viking_client import VikingAPIError, VikingClientPool
+from app.viking_client import VikingAPIError, VikingClientPool, VikingProtocolError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,6 +44,9 @@ mcp = FastMCP(
         "Для выгрузки выбирай портфель с "
         "history_available=true. В get_portfolio_data даты всегда передавай с часовым поясом. "
         "Используй delivery=auto: небольшие выборки вернутся inline, большие — CSV-файлом. "
+        "Если пользователь просит следить за изменениями списка портфелей, вызови "
+        "subscribe_available_portfolios, читай события через get_available_portfolio_updates "
+        "и обязательно заверши подписку через unsubscribe_available_portfolios. "
         "Если пользователь не назвал поля, используй buy, sell и pos. Сервер только читает данные. "
         "Credentials не входят в аргументы MCP-инструментов."
     ),
@@ -73,6 +76,39 @@ READ_ONLY = ToolAnnotations(
     openWorldHint=True,
 )
 
+SUBSCRIPTION_TOOL = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=False,
+    openWorldHint=True,
+)
+
+SUBSCRIPTION_ERRORS = (
+    ValueError,
+    RuntimeError,
+    VikingAPIError,
+    VikingProtocolError,
+    ConnectionError,
+    TimeoutError,
+)
+
+
+def _error_result(exc: BaseException) -> CallToolResult:
+    details: dict[str, Any] = {
+        "status": "error",
+        "error_type": type(exc).__name__,
+        "message": str(exc),
+    }
+    if isinstance(exc, VikingAPIError):
+        details["code"] = exc.code
+        if exc.response is not None:
+            details["api_response"] = exc.response
+    return CallToolResult(
+        content=[TextContent(type="text", text=str(exc))],
+        structuredContent=details,
+        isError=True,
+    )
+
 
 def _service_for_request() -> MarketDataService:
     access_token = get_access_token()
@@ -95,6 +131,92 @@ def _service_for_request() -> MarketDataService:
 )
 async def list_available_portfolios(history_only: bool = False) -> dict[str, Any]:
     return await _service_for_request().list_available_portfolios(history_only=history_only)
+
+
+@mcp.tool(
+    title="Подписаться на доступные портфели",
+    description=(
+        "Создаёт подписку Viking available_portfolio_list.subscribe. Возвращает полный "
+        "первоначальный снапшот: subscription_id/eid, type, ts, r/result, data и все портфели "
+        "с robot_id, portfolio, owner. Сохрани subscription_id для чтения обновлений и отписки."
+    ),
+    annotations=SUBSCRIPTION_TOOL,
+)
+async def subscribe_available_portfolios() -> CallToolResult:
+    try:
+        result = await _service_for_request().subscribe_available_portfolios()
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Available portfolios subscription failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=(
+                    f"Подписка создана. Получено портфелей: "
+                    f"{len(result['portfolios_add'])}."
+                ),
+            )
+        ],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Получить обновления доступных портфелей",
+    description=(
+        "Возвращает накопленные события активной подписки: добавленные и удалённые портфели. "
+        "Каждое событие содержит type, eid, ts, r/result, data, portfolios_add и portfolios_del. "
+        "wait_seconds=0 проверяет сразу, значение до 30 секунд позволяет дождаться события."
+    ),
+    annotations=SUBSCRIPTION_TOOL,
+)
+async def get_available_portfolio_updates(
+    subscription_id: Annotated[str, Field(min_length=1)],
+    wait_seconds: Annotated[float, Field(ge=0, le=30)] = 0,
+    max_events: Annotated[int, Field(ge=1, le=500)] = 100,
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().get_available_portfolio_updates(
+            subscription_id=subscription_id,
+            wait_seconds=wait_seconds,
+            max_events=max_events,
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Reading available portfolios updates failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text", text=f"Получено событий подписки: {result['event_count']}."
+            )
+        ],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Отписаться от доступных портфелей",
+    description=(
+        "Вызывает available_portfolio_list.unsubscribe для указанного subscription_id "
+        "и возвращает полный ответ Viking."
+    ),
+    annotations=SUBSCRIPTION_TOOL,
+)
+async def unsubscribe_available_portfolios(
+    subscription_id: Annotated[str, Field(min_length=1)],
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().unsubscribe_available_portfolios(
+            subscription_id=subscription_id
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Available portfolios unsubscribe failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[TextContent(type="text", text="Подписка успешно закрыта.")],
+        structuredContent=result,
+    )
 
 
 @mcp.tool(
