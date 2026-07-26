@@ -6,10 +6,17 @@ from app import main
 async def test_mcp_lists_expected_tools():
     async with create_connected_server_and_client_session(main.mcp, raise_exceptions=True) as session:
         result = await session.list_tools()
-    assert {tool.name for tool in result.tools} == {
+    tools = {tool.name: tool for tool in result.tools}
+    assert set(tools) == {
         "list_available_portfolios",
+        "subscribe_available_portfolios",
+        "get_available_portfolio_updates",
+        "unsubscribe_available_portfolios",
         "get_portfolio_data",
     }
+    assert tools["subscribe_available_portfolios"].annotations.idempotentHint is False
+    assert tools["get_available_portfolio_updates"].annotations.idempotentHint is False
+    assert tools["unsubscribe_available_portfolios"].annotations.idempotentHint is False
 
 
 async def test_mcp_portfolio_tool_returns_structured_content(monkeypatch):
