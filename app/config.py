@@ -17,6 +17,7 @@ class Settings(BaseSettings):
 
     viking_ws_url: str = "wss://bot.fkviking.com/ws"
     viking_request_timeout_seconds: float = Field(default=45.0, gt=1, le=300)
+    credentials_idle_ttl_seconds: int = Field(default=900, ge=60, le=86_400)
 
     public_base_url: str = ""
     railway_public_domain: str = ""
