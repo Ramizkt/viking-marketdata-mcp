@@ -13,25 +13,22 @@ async def test_mcp_lists_expected_tools():
 
 
 async def test_mcp_portfolio_tool_returns_structured_content(monkeypatch):
-    async def fake_list_available_portfolios(*, history_only: bool):
-        return {
-            "count": 1,
-            "history_only": history_only,
-            "portfolios": [
-                {
-                    "robot_id": "1",
-                    "portfolio": "demo",
-                    "owner": "owner@example.com",
-                    "history_available": True,
-                }
-            ],
-        }
+    class FakeService:
+        async def list_available_portfolios(self, *, history_only: bool):
+            return {
+                "count": 1,
+                "history_only": history_only,
+                "portfolios": [
+                    {
+                        "robot_id": "1",
+                        "portfolio": "demo",
+                        "owner": "owner@example.com",
+                        "history_available": True,
+                    }
+                ],
+            }
 
-    monkeypatch.setattr(
-        main.service,
-        "list_available_portfolios",
-        fake_list_available_portfolios,
-    )
+    monkeypatch.setattr(main, "_service_for_request", lambda: FakeService())
 
     async with create_connected_server_and_client_session(main.mcp, raise_exceptions=True) as session:
         result = await session.call_tool(

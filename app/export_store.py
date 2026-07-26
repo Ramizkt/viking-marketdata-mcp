@@ -4,6 +4,7 @@ import csv
 import hashlib
 import hmac
 import re
+import secrets
 import time
 import uuid
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ class ExportedFile:
 class ExportStore:
     def __init__(self, settings: Settings):
         self.settings = settings
+        self._signing_key = settings.export_signing_key or secrets.token_urlsafe(32)
         self.root = settings.export_dir.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
@@ -58,7 +60,7 @@ class ExportStore:
             download_url=self._download_url(filename, expires_at),
         )
 
-    def resolve_signed(self, filename: str, expires_at: int, signature: str) -> Path | None:
+    def resolve_download(self, filename: str, expires_at: int, signature: str) -> Path | None:
         if not SAFE_FILENAME.fullmatch(filename):
             return None
         if expires_at < int(time.time()):
@@ -81,8 +83,6 @@ class ExportStore:
                 continue
 
     def _download_url(self, filename: str, expires_at: int) -> str:
-        if not self.settings.mcp_access_token:
-            return self.root.joinpath(filename).as_uri()
         query = urlencode(
             {
                 "expires": expires_at,
@@ -94,7 +94,7 @@ class ExportStore:
     def _signature(self, filename: str, expires_at: int) -> str:
         message = f"{filename}:{expires_at}".encode()
         return hmac.new(
-            self.settings.mcp_access_token.encode(),
+            self._signing_key.encode(),
             message,
             hashlib.sha256,
         ).hexdigest()

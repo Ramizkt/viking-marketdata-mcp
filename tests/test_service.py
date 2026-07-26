@@ -38,8 +38,8 @@ def service(tmp_path):
         inline_max_rows=2,
         inline_max_bytes=100_000,
         export_dir=tmp_path,
-        mcp_access_token="test-token",
         public_base_url="https://example.test",
+        export_signing_key="test-signing-key",
     )
     return MarketDataService(settings, FakeClient(), ExportStore(settings))
 

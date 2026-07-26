@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import contextlib
 import logging
 from datetime import datetime
@@ -15,9 +14,16 @@ from starlette.responses import FileResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
 
 from app.config import get_settings
+from app.credentials import (
+    REQUIRED_HEADERS,
+    credentials_from_scope,
+    require_request_credentials,
+    reset_request_credentials,
+    set_request_credentials,
+)
 from app.export_store import ExportStore
 from app.service import Aggregation, Delivery, MarketDataService
-from app.viking_client import VikingAPIError, VikingClient
+from app.viking_client import VikingAPIError, VikingClientPool
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,9 +32,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
-viking_client = VikingClient(settings)
+viking_clients = VikingClientPool(settings)
 export_store = ExportStore(settings)
-service = MarketDataService(settings, viking_client, export_store)
 
 mcp = FastMCP(
     "Viking Market Data",
@@ -36,7 +41,9 @@ mcp = FastMCP(
         "Сначала вызывай list_available_portfolios. Для выгрузки выбирай портфель с "
         "history_available=true. В get_portfolio_data даты всегда передавай с часовым поясом. "
         "Используй delivery=auto: небольшие выборки вернутся inline, большие — CSV-файлом. "
-        "Если пользователь не назвал поля, используй buy, sell и pos. Сервер только читает данные."
+        "Если пользователь не назвал поля, используй buy, sell и pos. Сервер только читает данные. "
+        "Каждый клиент обязан передавать собственные Viking credentials в заголовках "
+        "X-Viking-Email, X-Viking-API-Key и X-Viking-Role."
     ),
     host="0.0.0.0",
     port=settings.port,
@@ -53,6 +60,11 @@ READ_ONLY = ToolAnnotations(
 )
 
 
+def _service_for_request() -> MarketDataService:
+    credentials = require_request_credentials()
+    return MarketDataService(settings, viking_clients.get(credentials), export_store)
+
+
 @mcp.tool(
     title="Доступные портфели",
     description=(
@@ -63,7 +75,7 @@ READ_ONLY = ToolAnnotations(
     annotations=READ_ONLY,
 )
 async def list_available_portfolios(history_only: bool = False) -> dict[str, Any]:
-    return await service.list_available_portfolios(history_only=history_only)
+    return await _service_for_request().list_available_portfolios(history_only=history_only)
 
 
 @mcp.tool(
@@ -90,7 +102,7 @@ async def get_portfolio_data(
     preview_rows: Annotated[int, Field(ge=0, le=100)] = 5,
 ) -> CallToolResult:
     try:
-        result = await service.get_portfolio_data(
+        result = await _service_for_request().get_portfolio_data(
             robot_id=robot_id,
             portfolio=portfolio,
             date_from=date_from,
@@ -129,8 +141,9 @@ async def health(_: Request) -> JSONResponse:
             "status": "ok",
             "service": "viking-marketdata-mcp",
             "mcp_path": "/mcp",
-            "viking_credentials_configured": bool(settings.viking_email and settings.viking_api_key),
-            "mcp_auth_configured": bool(settings.mcp_access_token),
+            "credential_mode": "per_request_headers",
+            "server_credentials_stored": False,
+            "required_mcp_headers": list(REQUIRED_HEADERS),
         }
     )
 
@@ -142,34 +155,37 @@ async def download(request: Request):
     except ValueError:
         return PlainTextResponse("Invalid download link", status_code=403)
     signature = request.query_params.get("sig", "")
-    path = export_store.resolve_signed(filename, expires_at, signature)
+    path = export_store.resolve_download(filename, expires_at, signature)
     if path is None:
         return PlainTextResponse("Download link is invalid or expired", status_code=403)
     return FileResponse(path, media_type="text/csv", filename=filename.split("--", 1)[-1])
 
 
-class MCPBearerAuthMiddleware:
-    """Minimal static bearer-token gate for the Streamable HTTP endpoint."""
+class VikingCredentialsMiddleware:
+    """Attach caller-supplied Viking credentials to each stateless MCP request."""
 
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http" and scope.get("path", "").startswith("/mcp"):
-            if not settings.mcp_access_token:
-                response = PlainTextResponse("MCP_ACCESS_TOKEN is not configured", status_code=503)
-                await response(scope, receive, send)
-                return
-            headers = {key.lower(): value for key, value in scope.get("headers", [])}
-            expected = f"Bearer {settings.mcp_access_token}".encode()
-            if headers.get(b"authorization") != expected:
-                response = PlainTextResponse(
-                    "Unauthorized",
+            credentials, missing = credentials_from_scope(scope)
+            if credentials is None:
+                response = JSONResponse(
+                    {
+                        "error": "Missing Viking credentials",
+                        "missing_headers": missing,
+                    },
                     status_code=401,
-                    headers={"WWW-Authenticate": "Bearer"},
                 )
                 await response(scope, receive, send)
                 return
+            token = set_request_credentials(credentials)
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                reset_request_credentials(token)
+            return
         await self.app(scope, receive, send)
 
 
@@ -180,7 +196,7 @@ _mcp_http_app = mcp.streamable_http_app()
 async def lifespan(_: Starlette):
     async with mcp.session_manager.run():
         yield
-    await viking_client.close()
+    await viking_clients.close()
 
 
 _starlette_app = Starlette(
@@ -191,22 +207,13 @@ _starlette_app = Starlette(
     ],
     lifespan=lifespan,
 )
-app = MCPBearerAuthMiddleware(_starlette_app)
+app = VikingCredentialsMiddleware(_starlette_app)
 
 
 def run() -> None:
-    parser = argparse.ArgumentParser(description="Viking market-data MCP server")
-    parser.add_argument(
-        "--transport",
-        choices=("stdio", "http"),
-        default="stdio",
-        help="stdio for local Codex, http for a remote server",
-    )
-    args = parser.parse_args()
-    if args.transport == "stdio":
-        mcp.run(transport="stdio")
-    else:
-        mcp.run(transport="streamable-http")
+    import uvicorn
+
+    uvicorn.run("app.main:app", host="0.0.0.0", port=settings.port)
 
 
 if __name__ == "__main__":

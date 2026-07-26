@@ -15,13 +15,9 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    viking_email: str = ""
-    viking_api_key: str = ""
-    viking_role: str = "trader"
     viking_ws_url: str = "wss://bot.fkviking.com/ws"
     viking_request_timeout_seconds: float = Field(default=45.0, gt=1, le=300)
 
-    mcp_access_token: str = ""
     public_base_url: str = ""
     railway_public_domain: str = ""
     port: int = Field(default=8000, ge=1, le=65535)
@@ -31,6 +27,7 @@ class Settings(BaseSettings):
     max_points_per_field: int = Field(default=500_000, ge=1_000, le=5_000_000)
     export_ttl_seconds: int = Field(default=86_400, ge=300, le=2_592_000)
     export_dir: Path = Path("./data/exports")
+    export_signing_key: str = ""
 
     @property
     def resolved_public_base_url(self) -> str:
@@ -39,19 +36,6 @@ class Settings(BaseSettings):
         if self.railway_public_domain:
             return f"https://{self.railway_public_domain}".rstrip("/")
         return f"http://127.0.0.1:{self.port}"
-
-    def require_viking_credentials(self) -> None:
-        missing = [
-            name
-            for name, value in (
-                ("VIKING_EMAIL", self.viking_email),
-                ("VIKING_API_KEY", self.viking_api_key),
-            )
-            if not value
-        ]
-        if missing:
-            raise RuntimeError("Viking API credentials are not configured. Missing: " + ", ".join(missing))
-
 
 @lru_cache
 def get_settings() -> Settings:

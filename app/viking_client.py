@@ -13,6 +13,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.protocol import State
 
 from app.config import Settings
+from app.credentials import VikingCredentials
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +26,34 @@ class VikingAPIError(RuntimeError):
         self.code = code
 
 
-class VikingClient:
-    """Concurrent request/response client over one persistent Viking WebSocket."""
+class VikingClientPool:
+    """Reuse one persistent Viking WebSocket per set of user credentials."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        self._clients: dict[str, VikingClient] = {}
+
+    def get(self, credentials: VikingCredentials) -> VikingClient:
+        fingerprint = credentials.fingerprint
+        client = self._clients.get(fingerprint)
+        if client is None:
+            client = VikingClient(self.settings, credentials)
+            self._clients[fingerprint] = client
+        return client
+
+    async def close(self) -> None:
+        clients = list(self._clients.values())
+        self._clients.clear()
+        if clients:
+            await asyncio.gather(*(client.close() for client in clients), return_exceptions=True)
+
+
+class VikingClient:
+    """Concurrent request/response client over one persistent Viking WebSocket."""
+
+    def __init__(self, settings: Settings, credentials: VikingCredentials):
+        self.settings = settings
+        self.credentials = credentials
         self._ws: ClientConnection | None = None
         self._connect_lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
@@ -176,7 +200,6 @@ class VikingClient:
         async with self._connect_lock:
             if self.connected:
                 return
-            self.settings.require_viking_credentials()
             logger.info("Connecting to Viking WebSocket API")
             ws = await connect(
                 self.settings.viking_ws_url,
@@ -193,9 +216,9 @@ class VikingClient:
                 await self._request_connected(
                     "authorization_key",
                     {
-                        "email": self.settings.viking_email,
-                        "key": self.settings.viking_api_key,
-                        "role": self.settings.viking_role.lower(),
+                        "email": self.credentials.email,
+                        "key": self.credentials.api_key,
+                        "role": self.credentials.role,
                         "group": 0.1,
                         "compress": True,
                     },
