@@ -18,6 +18,14 @@ class Settings(BaseSettings):
     viking_ws_url: str = "wss://bot.fkviking.com/ws"
     viking_request_timeout_seconds: float = Field(default=45.0, gt=1, le=300)
     credentials_idle_ttl_seconds: int = Field(default=900, ge=60, le=86_400)
+    oauth_session_idle_ttl_seconds: int = Field(default=900, ge=60, le=86_400)
+    oauth_session_max_ttl_seconds: int = Field(default=28_800, ge=300, le=86_400)
+    oauth_persistent_token_ttl_seconds: int = Field(
+        default=2_592_000,
+        ge=3_600,
+        le=31_536_000,
+    )
+    credential_token_key: str = ""
 
     public_base_url: str = ""
     railway_public_domain: str = ""
@@ -37,6 +45,7 @@ class Settings(BaseSettings):
         if self.railway_public_domain:
             return f"https://{self.railway_public_domain}".rstrip("/")
         return f"http://127.0.0.1:{self.port}"
+
 
 @lru_cache
 def get_settings() -> Settings:
