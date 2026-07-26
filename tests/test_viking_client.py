@@ -1,7 +1,16 @@
+import asyncio
 import json
 import zlib
+from unittest.mock import AsyncMock
 
-from app.viking_client import VikingClient
+import pytest
+
+from app.viking_client import (
+    VikingAPIError,
+    VikingClient,
+    VikingProtocolError,
+    _Subscription,
+)
 
 
 def test_decode_plain_message():
@@ -28,3 +37,236 @@ def test_extract_points_filters_period_and_bad_rows():
         }
     }
     assert VikingClient._extract_points(response, 100, 200) == {100: 2, 150: 3}
+
+
+def test_parse_portfolio_list_preserves_all_documented_fields():
+    response = {
+        "data": {
+            "portfolios_add": [["1", "alpha", "owner@example.com"]],
+            "portfolios_del": [["2", "beta", "other@example.com"]],
+        }
+    }
+    added, deleted = VikingClient._parse_portfolio_list_data(response)
+    assert added == [
+        {"robot_id": "1", "portfolio": "alpha", "owner": "owner@example.com"}
+    ]
+    assert deleted == [
+        {"robot_id": "2", "portfolio": "beta", "owner": "other@example.com"}
+    ]
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"portfolios_add": "bad"},
+        {"portfolios_add": [["1", "missing-owner"]]},
+        {"portfolios_add": [["1", "name", 123]]},
+    ],
+)
+def test_parse_portfolio_list_rejects_malformed_rows(data):
+    with pytest.raises(VikingProtocolError):
+        VikingClient._parse_portfolio_list_data({"data": data})
+
+
+async def test_list_portfolios_accepts_normalized_subscription_rows():
+    client = object.__new__(VikingClient)
+    client.subscribe_available_portfolios = AsyncMock(
+        return_value={
+            "subscription_id": "sub-1",
+            "portfolios_add": [
+                {
+                    "robot_id": "1",
+                    "portfolio": "alpha",
+                    "owner": "owner@example.com",
+                }
+            ],
+        }
+    )
+    client.unsubscribe_available_portfolios = AsyncMock(return_value={"unsubscribed": True})
+    client.request = AsyncMock(
+        return_value={"data": {"portfolios": [["1", "alpha"]]}}
+    )
+
+    result = await client.list_portfolios()
+
+    assert result == [
+        {
+            "robot_id": "1",
+            "portfolio": "alpha",
+            "owner": "owner@example.com",
+            "history_available": True,
+        }
+    ]
+    client.unsubscribe_available_portfolios.assert_awaited_once_with("sub-1")
+
+
+async def test_subscribe_returns_complete_normalized_snapshot():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {}
+    client._subscribe = AsyncMock(
+        return_value={
+            "type": "available_portfolio_list.subscribe",
+            "eid": "sub-1",
+            "ts": 123,
+            "r": "s",
+            "data": {
+                "portfolios_add": [["1", "alpha", "owner@example.com"]],
+            },
+        }
+    )
+
+    result = await client.subscribe_available_portfolios()
+
+    assert result["subscription_id"] == "sub-1"
+    assert result["r"] == "s"
+    assert result["result"] == "s"
+    assert result["data"] == {
+        "portfolios_add": [
+            {"robot_id": "1", "portfolio": "alpha", "owner": "owner@example.com"}
+        ]
+    }
+    assert result["portfolios_add"] == result["data"]["portfolios_add"]
+    assert result["portfolios_del"] == []
+
+
+async def test_subscribe_rejects_malformed_snapshot_and_closes_connection():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {
+        "sub-1": _Subscription("available_portfolio_list.subscribe", asyncio.Queue())
+    }
+    client._subscribe = AsyncMock(
+        return_value={
+            "type": "available_portfolio_list.subscribe",
+            "eid": "sub-1",
+            "ts": 123,
+            "r": "s",
+            "data": {},
+        }
+    )
+    client.close = AsyncMock()
+
+    with pytest.raises(VikingProtocolError, match="missing portfolios_add"):
+        await client.subscribe_available_portfolios()
+
+    assert "sub-1" not in client._subscriptions
+    client.close.assert_awaited_once()
+
+
+async def test_get_portfolio_updates_returns_complete_events():
+    client = object.__new__(VikingClient)
+    queue = asyncio.Queue()
+    await queue.put(
+        {
+            "type": "available_portfolio_list.subscribe",
+            "eid": "sub-1",
+            "ts": 123,
+            "r": "u",
+            "data": {
+                "portfolios_add": [["1", "alpha", "owner@example.com"]],
+                "portfolios_del": [["2", "beta", "other@example.com"]],
+            },
+        }
+    )
+    client._subscriptions = {
+        "sub-1": _Subscription("available_portfolio_list.subscribe", queue)
+    }
+
+    result = await client.get_available_portfolio_updates("sub-1")
+
+    assert result["event_count"] == 1
+    assert result["events"][0]["ts"] == 123
+    assert result["events"][0]["r"] == "u"
+    assert result["events"][0]["data"]["portfolios_add"][0]["robot_id"] == "1"
+    assert result["events"][0]["portfolios_add"][0]["owner"] == "owner@example.com"
+
+
+async def test_get_portfolio_updates_raises_complete_api_error():
+    client = object.__new__(VikingClient)
+    queue = asyncio.Queue()
+    response = {
+        "type": "available_portfolio_list.subscribe",
+        "eid": "sub-1",
+        "ts": 123,
+        "r": "e",
+        "data": {"msg": "Operation timeout", "code": 666},
+    }
+    await queue.put(response)
+    client._subscriptions = {
+        "sub-1": _Subscription("available_portfolio_list.subscribe", queue)
+    }
+
+    with pytest.raises(VikingAPIError, match="Operation timeout") as error:
+        await client.get_available_portfolio_updates("sub-1")
+
+    assert error.value.code == 666
+    assert error.value.response == response
+
+
+async def test_get_portfolio_updates_rejects_overflowed_buffer():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {
+        "sub-1": _Subscription(
+            "available_portfolio_list.subscribe",
+            asyncio.Queue(),
+            overflowed=True,
+        )
+    }
+
+    with pytest.raises(VikingProtocolError, match="events were lost"):
+        await client.get_available_portfolio_updates("sub-1")
+
+
+async def test_get_portfolio_updates_rejects_unknown_subscription():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {}
+    with pytest.raises(ValueError, match="Unknown or inactive"):
+        await client.get_available_portfolio_updates("missing")
+
+
+async def test_unsubscribe_sends_subscription_eid_and_returns_complete_ack():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {
+        "sub-1": _Subscription("available_portfolio_list.subscribe", asyncio.Queue())
+    }
+    client.request = AsyncMock(
+        return_value={
+            "type": "available_portfolio_list.unsubscribe",
+            "eid": "request-1",
+            "ts": 456,
+            "r": "p",
+            "data": {},
+        }
+    )
+
+    result = await client.unsubscribe_available_portfolios("sub-1")
+
+    client.request.assert_awaited_once_with(
+        "available_portfolio_list.unsubscribe",
+        {"sub_eid": "sub-1"},
+    )
+    assert result == {
+        "subscription_id": "sub-1",
+        "type": "available_portfolio_list.unsubscribe",
+        "eid": "request-1",
+        "ts": 456,
+        "r": "p",
+        "result": "p",
+        "data": {},
+        "unsubscribed": True,
+    }
+    assert "sub-1" not in client._subscriptions
+
+
+async def test_unsubscribe_api_error_keeps_subscription_for_retry():
+    client = object.__new__(VikingClient)
+    subscription = _Subscription(
+        "available_portfolio_list.subscribe",
+        asyncio.Queue(),
+    )
+    client._subscriptions = {"sub-1": subscription}
+    client.request = AsyncMock(side_effect=VikingAPIError("Operation timeout", 666))
+
+    with pytest.raises(VikingAPIError, match="Operation timeout"):
+        await client.unsubscribe_available_portfolios("sub-1")
+
+    assert client._subscriptions["sub-1"] is subscription
