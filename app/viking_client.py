@@ -106,6 +106,10 @@ class VikingClient:
     def connected(self) -> bool:
         return self._ws is not None and self._ws.state is State.OPEN
 
+    async def authenticate(self) -> None:
+        """Validate credentials by completing Viking WebSocket authorization."""
+        await self._ensure_connected()
+
     async def close(self) -> None:
         ws, self._ws = self._ws, None
         current = asyncio.current_task()
