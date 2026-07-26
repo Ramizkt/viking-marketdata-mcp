@@ -7,9 +7,19 @@ async def test_mcp_lists_expected_tools():
     async with create_connected_server_and_client_session(main.mcp, raise_exceptions=True) as session:
         result = await session.list_tools()
     assert {tool.name for tool in result.tools} == {
+        "credential_setup",
         "list_available_portfolios",
         "get_portfolio_data",
     }
+
+
+async def test_credential_setup_does_not_require_credentials():
+    async with create_connected_server_and_client_session(main.mcp, raise_exceptions=True) as session:
+        result = await session.call_tool("credential_setup", {})
+
+    assert result.isError is False
+    assert result.structuredContent["status"] == "setup_required"
+    assert len(result.structuredContent["modes"]) == 2
 
 
 async def test_mcp_portfolio_tool_returns_structured_content(monkeypatch):
