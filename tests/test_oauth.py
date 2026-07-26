@@ -81,6 +81,7 @@ async def _authorize_and_submit(
         assert "Только на эту сессию" in page.text
         assert "Запомнить на этом компьютере" in page.text
         assert "PowerShell" not in page.text
+        assert "form-action" not in page.headers["content-security-policy"]
 
         response = browser.post(
             f"/oauth/connect/{pending_id}",
