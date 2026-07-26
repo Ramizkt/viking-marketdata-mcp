@@ -32,7 +32,8 @@ _request_credentials: ContextVar[VikingCredentials | None] = ContextVar(
 
 SETUP_REQUIRED_MESSAGE = (
     "Viking credentials are not configured. Choose one local mode: "
-    "(1) temporary session — credentials stay only in RAM until Codex closes; "
+    "(1) temporary session — credentials are not written to disk and the Railway RAM copy "
+    "expires after 15 minutes without requests; "
     "(2) encrypted local file — the local launcher reads it and sends HTTP headers. "
     "Open the server /setup page for exact instructions. Never paste the API key into chat."
 )
