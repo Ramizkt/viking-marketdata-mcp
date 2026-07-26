@@ -6,6 +6,8 @@ import logging
 import uuid
 import zlib
 from collections.abc import Iterable
+from dataclasses import dataclass
+from time import monotonic
 from typing import Any
 
 from websockets.asyncio.client import ClientConnection, connect
@@ -26,23 +28,62 @@ class VikingAPIError(RuntimeError):
         self.code = code
 
 
+@dataclass
+class _PooledClient:
+    client: VikingClient
+    last_used: float
+
+
 class VikingClientPool:
     """Reuse one persistent Viking WebSocket per set of user credentials."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
-        self._clients: dict[str, VikingClient] = {}
+        self._clients: dict[str, _PooledClient] = {}
+        self._cleanup_task: asyncio.Task[None] | None = None
+
+    def start(self) -> None:
+        if self._cleanup_task is None:
+            self._cleanup_task = asyncio.create_task(self._cleanup_loop())
 
     def get(self, credentials: VikingCredentials) -> VikingClient:
         fingerprint = credentials.fingerprint
-        client = self._clients.get(fingerprint)
-        if client is None:
-            client = VikingClient(self.settings, credentials)
-            self._clients[fingerprint] = client
-        return client
+        pooled = self._clients.get(fingerprint)
+        if pooled is None:
+            pooled = _PooledClient(
+                client=VikingClient(self.settings, credentials),
+                last_used=monotonic(),
+            )
+            self._clients[fingerprint] = pooled
+        else:
+            pooled.last_used = monotonic()
+        return pooled.client
+
+    async def _cleanup_loop(self) -> None:
+        interval = min(60, max(10, self.settings.credentials_idle_ttl_seconds // 4))
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                cutoff = monotonic() - self.settings.credentials_idle_ttl_seconds
+                expired = [
+                    (fingerprint, pooled)
+                    for fingerprint, pooled in self._clients.items()
+                    if pooled.last_used <= cutoff
+                ]
+                for fingerprint, pooled in expired:
+                    self._clients.pop(fingerprint, None)
+                    await pooled.client.close()
+                if expired:
+                    logger.info("Removed %s idle Viking credential session(s) from RAM", len(expired))
+        except asyncio.CancelledError:
+            raise
 
     async def close(self) -> None:
-        clients = list(self._clients.values())
+        if self._cleanup_task is not None:
+            self._cleanup_task.cancel()
+            await asyncio.gather(self._cleanup_task, return_exceptions=True)
+            self._cleanup_task = None
+        clients = [pooled.client for pooled in self._clients.values()]
         self._clients.clear()
         if clients:
             await asyncio.gather(*(client.close() for client in clients), return_exceptions=True)
