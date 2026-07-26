@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import uuid
@@ -23,9 +24,27 @@ logger = logging.getLogger(__name__)
 class VikingAPIError(RuntimeError):
     """Error returned by the Viking WebSocket API."""
 
-    def __init__(self, message: str, code: int | None = None):
+    def __init__(
+        self,
+        message: str,
+        code: int | None = None,
+        *,
+        response: dict[str, Any] | None = None,
+    ):
         super().__init__(message)
         self.code = code
+        self.response = response
+
+
+class VikingProtocolError(RuntimeError):
+    """Malformed or unexpected response returned by the Viking API."""
+
+
+@dataclass
+class _Subscription:
+    message_type: str
+    queue: asyncio.Queue[dict[str, Any]]
+    overflowed: bool = False
 
 
 @dataclass
@@ -99,6 +118,7 @@ class VikingClient:
         self._connect_lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._subscriptions: dict[str, _Subscription] = {}
         self._reader_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
 
@@ -152,13 +172,10 @@ class VikingClient:
 
     async def list_portfolios(self) -> list[dict[str, Any]]:
         """Return all accessible portfolios and whether history is enabled."""
-        all_response = await self.request("available_portfolio_list.subscribe", {})
-        all_rows = all_response.get("data", {}).get("portfolios_add", [])
+        snapshot = await self.subscribe_available_portfolios()
+        all_rows = snapshot["portfolios_add"]
         try:
-            await self.request(
-                "available_portfolio_list.unsubscribe",
-                {"sub_eid": all_response["eid"]},
-            )
+            await self.unsubscribe_available_portfolios(snapshot["subscription_id"])
         except Exception:
             logger.warning("Could not unsubscribe from available portfolio list", exc_info=True)
 
@@ -168,21 +185,127 @@ class VikingClient:
 
         result = []
         for row in all_rows:
-            if len(row) < 2:
-                continue
-            robot_id = str(row[0])
-            portfolio = str(row[1])
+            robot_id = row["robot_id"]
+            portfolio = row["portfolio"]
             result.append(
                 {
                     "robot_id": robot_id,
                     "portfolio": portfolio,
-                    "owner": str(row[2]) if len(row) > 2 else None,
+                    "owner": row["owner"],
                     "history_available": (robot_id, portfolio) in history_ids,
                 }
             )
 
         result.sort(key=lambda item: (item["robot_id"], item["portfolio"]))
         return result
+
+    async def subscribe_available_portfolios(self) -> dict[str, Any]:
+        """Subscribe and return the initial complete portfolio-list snapshot."""
+        response = await self._subscribe("available_portfolio_list.subscribe", {})
+        subscription_id = self._required_str(response, "eid")
+        try:
+            event = self._parse_portfolio_event(
+                response,
+                subscription_id=subscription_id,
+                allowed_results={"s"},
+                require_portfolios_add=True,
+            )
+            if event["portfolios_del"]:
+                raise VikingProtocolError(
+                    "Initial portfolio snapshot unexpectedly contains portfolios_del"
+                )
+            return {"subscription_id": subscription_id, **event}
+        except BaseException:
+            self._subscriptions.pop(subscription_id, None)
+            await self.close()
+            raise
+
+    async def get_available_portfolio_updates(
+        self,
+        subscription_id: str,
+        *,
+        wait_seconds: float = 0,
+        max_events: int = 100,
+    ) -> dict[str, Any]:
+        """Return buffered add/delete events for an active portfolio-list subscription."""
+        subscription = self._subscriptions.get(subscription_id)
+        if subscription is None or subscription.message_type != "available_portfolio_list.subscribe":
+            raise ValueError("Unknown or inactive available-portfolio subscription_id")
+        if subscription.overflowed:
+            raise VikingProtocolError(
+                "Available-portfolio subscription buffer overflowed and events were lost; "
+                "unsubscribe and create a new subscription"
+            )
+        if not 0 <= wait_seconds <= 30:
+            raise ValueError("wait_seconds must be in range 0..30")
+        if not 1 <= max_events <= 500:
+            raise ValueError("max_events must be in range 1..500")
+
+        messages: list[dict[str, Any]] = []
+        if wait_seconds and subscription.queue.empty():
+            with contextlib.suppress(TimeoutError):
+                messages.append(
+                    await asyncio.wait_for(subscription.queue.get(), timeout=wait_seconds)
+                )
+        while len(messages) < max_events:
+            try:
+                messages.append(subscription.queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+
+        events = []
+        for message in messages:
+            self._validate_response_identity(
+                message,
+                expected_type="available_portfolio_list.subscribe",
+                expected_eid=subscription_id,
+            )
+            if message.get("r") == "e":
+                self._raise_api_error(message)
+            events.append(
+                self._parse_portfolio_event(
+                    message,
+                    subscription_id=subscription_id,
+                    allowed_results={"s", "u"},
+                )
+            )
+        return {
+            "subscription_id": subscription_id,
+            "event_count": len(events),
+            "events": events,
+            "more_available": not subscription.queue.empty(),
+        }
+
+    async def unsubscribe_available_portfolios(self, subscription_id: str) -> dict[str, Any]:
+        """Unsubscribe from portfolio-list updates and return the full acknowledgement."""
+        subscription = self._subscriptions.get(subscription_id)
+        if subscription is None or subscription.message_type != "available_portfolio_list.subscribe":
+            raise ValueError("Unknown or inactive available-portfolio subscription_id")
+        response = await self.request(
+            "available_portfolio_list.unsubscribe",
+            {"sub_eid": subscription_id},
+        )
+        self._validate_response_identity(
+            response,
+            expected_type="available_portfolio_list.unsubscribe",
+        )
+        result = self._required_str(response, "r")
+        if result != "p":
+            raise VikingProtocolError(
+                "available_portfolio_list.unsubscribe returned an unexpected result; expected r='p'"
+            )
+        parsed = {
+            "subscription_id": subscription_id,
+            "type": self._required_str(response, "type"),
+            "eid": self._required_str(response, "eid"),
+            "ts": self._required_int(response, "ts"),
+            "r": result,
+            "result": result,
+            "data": self._required_dict(response, "data"),
+            "unsubscribed": True,
+        }
+        self._subscriptions.pop(subscription_id, None)
+        return parsed
 
     async def get_portfolio_history(
         self,
@@ -298,12 +421,74 @@ class VikingClient:
         finally:
             self._pending.pop(eid, None)
 
-        if response.get("r") == "e":
-            error = response.get("data", {})
-            raise VikingAPIError(
-                str(error.get("msg", "Unknown Viking API error")),
-                code=error.get("code"),
+        try:
+            self._validate_response_identity(
+                response,
+                expected_type=message_type,
+                expected_eid=eid,
             )
+            result = self._required_str(response, "r")
+        except VikingProtocolError:
+            await self.close()
+            raise
+        if result == "e":
+            try:
+                self._raise_api_error(response)
+            except VikingProtocolError:
+                await self.close()
+                raise
+        return response
+
+    async def _subscribe(
+        self,
+        message_type: str,
+        data: dict[str, Any],
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        await self._ensure_connected()
+        ws = self._ws
+        if ws is None or ws.state is not State.OPEN:
+            raise ConnectionError("Viking WebSocket is not connected")
+
+        eid = uuid.uuid4().hex
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._pending[eid] = future
+        self._subscriptions[eid] = _Subscription(message_type, asyncio.Queue(maxsize=1_000))
+        payload = {"type": message_type, "data": data, "eid": eid}
+        try:
+            async with self._send_lock:
+                await ws.send(json.dumps(payload, separators=(",", ":")))
+            response = await asyncio.wait_for(
+                future,
+                timeout=timeout or self.settings.viking_request_timeout_seconds,
+            )
+        except BaseException:
+            self._subscriptions.pop(eid, None)
+            await self.close()
+            raise
+        finally:
+            self._pending.pop(eid, None)
+
+        try:
+            self._validate_response_identity(
+                response,
+                expected_type=message_type,
+                expected_eid=eid,
+            )
+            result = self._required_str(response, "r")
+        except VikingProtocolError:
+            self._subscriptions.pop(eid, None)
+            await self.close()
+            raise
+        if result == "e":
+            self._subscriptions.pop(eid, None)
+            try:
+                self._raise_api_error(response)
+            except VikingProtocolError:
+                await self.close()
+                raise
         return response
 
     async def _reader_loop(self, ws: ClientConnection) -> None:
@@ -317,6 +502,18 @@ class VikingClient:
                     future = self._pending.get(str(eid)) if eid is not None else None
                     if future is not None and not future.done():
                         future.set_result(message)
+                        continue
+                    subscription = (
+                        self._subscriptions.get(str(eid)) if eid is not None else None
+                    )
+                    if subscription is not None:
+                        if subscription.queue.full():
+                            subscription.queue.get_nowait()
+                            subscription.overflowed = True
+                            logger.warning(
+                                "Dropped oldest buffered event for subscription %s", eid
+                            )
+                        subscription.queue.put_nowait(message)
         except asyncio.CancelledError:
             failure = ConnectionError("Viking WebSocket reader cancelled")
             raise
@@ -327,6 +524,7 @@ class VikingClient:
             if self._ws is ws:
                 self._ws = None
             self._fail_pending(failure)
+            self._subscriptions.clear()
 
     async def _heartbeat_loop(self, ws: ClientConnection) -> None:
         try:
@@ -344,6 +542,130 @@ class VikingClient:
             if not future.done():
                 future.set_exception(exc)
         self._pending.clear()
+
+    @classmethod
+    def _parse_portfolio_list_data(
+        cls, response: dict[str, Any]
+    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        data = cls._required_dict(response, "data")
+        return (
+            cls._parse_portfolio_rows(data.get("portfolios_add", []), "portfolios_add"),
+            cls._parse_portfolio_rows(data.get("portfolios_del", []), "portfolios_del"),
+        )
+
+    @staticmethod
+    def _parse_portfolio_rows(value: Any, field_name: str) -> list[dict[str, str]]:
+        if not isinstance(value, list):
+            raise VikingProtocolError(f"{field_name} must be an array")
+        result = []
+        for index, row in enumerate(value):
+            if not isinstance(row, list) or len(row) != 3:
+                raise VikingProtocolError(
+                    f"{field_name}[{index}] must contain robot_id, portfolio and owner"
+                )
+            if not all(isinstance(item, str) for item in row):
+                raise VikingProtocolError(f"{field_name}[{index}] fields must be strings")
+            result.append(
+                {"robot_id": row[0], "portfolio": row[1], "owner": row[2]}
+            )
+        return result
+
+    @classmethod
+    def _parse_portfolio_event(
+        cls,
+        response: dict[str, Any],
+        *,
+        subscription_id: str,
+        allowed_results: set[str],
+        require_portfolios_add: bool = False,
+    ) -> dict[str, Any]:
+        cls._validate_response_identity(
+            response,
+            expected_type="available_portfolio_list.subscribe",
+            expected_eid=subscription_id,
+        )
+        result = cls._required_str(response, "r")
+        if result not in allowed_results:
+            expected = ", ".join(repr(item) for item in sorted(allowed_results))
+            raise VikingProtocolError(
+                f"Portfolio-list response has unexpected r={result!r}; expected {expected}"
+            )
+
+        source_data = cls._required_dict(response, "data")
+        if require_portfolios_add and "portfolios_add" not in source_data:
+            raise VikingProtocolError("Initial portfolio snapshot is missing portfolios_add")
+        portfolios_add, portfolios_del = cls._parse_portfolio_list_data(response)
+        data: dict[str, Any] = {}
+        if "portfolios_add" in source_data:
+            data["portfolios_add"] = portfolios_add
+        if "portfolios_del" in source_data:
+            data["portfolios_del"] = portfolios_del
+        return {
+            "type": cls._required_str(response, "type"),
+            "eid": cls._required_str(response, "eid"),
+            "ts": cls._required_int(response, "ts"),
+            "r": result,
+            "result": result,
+            "data": data,
+            "portfolios_add": portfolios_add,
+            "portfolios_del": portfolios_del,
+        }
+
+    @classmethod
+    def _validate_response_identity(
+        cls,
+        response: dict[str, Any],
+        *,
+        expected_type: str,
+        expected_eid: str | None = None,
+    ) -> None:
+        response_type = cls._required_str(response, "type")
+        if response_type != expected_type:
+            raise VikingProtocolError(
+                f"Unexpected response type {response_type!r}; expected {expected_type!r}"
+            )
+        if expected_eid is not None:
+            response_eid = cls._required_str(response, "eid")
+            if response_eid != expected_eid:
+                raise VikingProtocolError(
+                    f"Unexpected response eid {response_eid!r}; expected {expected_eid!r}"
+                )
+
+    @classmethod
+    def _raise_api_error(cls, response: dict[str, Any]) -> None:
+        result = cls._required_str(response, "r")
+        if result != "e":
+            raise VikingProtocolError(
+                f"Cannot parse a non-error response as an API error: r={result!r}"
+            )
+        cls._required_int(response, "ts")
+        error = cls._required_dict(response, "data")
+        raise VikingAPIError(
+            cls._required_str(error, "msg"),
+            code=cls._required_int(error, "code"),
+            response=response,
+        )
+
+    @staticmethod
+    def _required_dict(value: dict[str, Any], key: str) -> dict[str, Any]:
+        result = value.get(key)
+        if not isinstance(result, dict):
+            raise VikingProtocolError(f"Response field '{key}' must be an object")
+        return result
+
+    @staticmethod
+    def _required_str(value: dict[str, Any], key: str) -> str:
+        result = value.get(key)
+        if not isinstance(result, str):
+            raise VikingProtocolError(f"Response field '{key}' must be a string")
+        return result
+
+    @staticmethod
+    def _required_int(value: dict[str, Any], key: str) -> int:
+        result = value.get(key)
+        if not isinstance(result, int) or isinstance(result, bool):
+            raise VikingProtocolError(f"Response field '{key}' must be an integer")
+        return result
 
     @staticmethod
     def decode_messages(raw_message: str | bytes) -> list[dict[str, Any]]:
