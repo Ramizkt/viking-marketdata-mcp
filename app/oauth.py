@@ -491,7 +491,7 @@ class VikingOAuthProvider(
                 "Cache-Control": "no-store",
                 "Content-Security-Policy": (
                     "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
-                    "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+                    "base-uri 'none'; frame-ancestors 'none'"
                 ),
                 "Referrer-Policy": "no-referrer",
                 "X-Content-Type-Options": "nosniff",
