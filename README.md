@@ -14,6 +14,12 @@ MVP MCP-сервера поверх WebSocket API `bot.fkviking.com`.
 
 ## MCP tools
 
+### `credential_setup`
+
+Возвращает безопасную страницу настройки и два режима credentials. Инструмент
+доступен до авторизации, поэтому публичный MCP можно сначала просто добавить
+в клиент.
+
 ### `list_available_portfolios`
 
 Параметры:
@@ -58,7 +64,21 @@ X-Viking-Role
 API key не является аргументом MCP tool и не попадает в запрос модели. Сервер
 использует credentials только в оперативной памяти для авторизации постоянного
 WebSocket-соединения с Viking. В переменные Railway, базу данных и файлы они не
-записываются.
+записываются. Неактивная копия удаляется из RAM через
+`CREDENTIALS_IDLE_TTL_SECONDS` (по умолчанию 900 секунд).
+
+Пользователь выбирает один из двух локальных режимов:
+
+1. **Текущая сессия** — credentials вводятся скрыто в PowerShell и существуют
+   только в памяти процессов.
+2. **Зашифрованный локальный файл** — email и role хранятся локально, API key
+   шифруется Windows DPAPI. Файл читает launcher, а не модель.
+
+Страница настройки:
+
+```text
+https://YOUR-DOMAIN.up.railway.app/setup
+```
 
 ## 2. Локальный запуск через HTTP
 
@@ -90,13 +110,14 @@ http://127.0.0.1:8000/mcp
 
 ```dotenv
 VIKING_WS_URL=wss://bot.fkviking.com/ws
+VIKING_REQUEST_TIMEOUT_SECONDS=45
+CREDENTIALS_IDLE_TTL_SECONDS=900
 EXPORT_DIR=/data/exports
 INLINE_MAX_ROWS=500
 INLINE_MAX_BYTES=200000
 MAX_POINTS_PER_FIELD=500000
 EXPORT_TTL_SECONDS=86400
 EXPORT_SIGNING_KEY=случайный внутренний секрет для подписания CSV-ссылок
-VIKING_REQUEST_TIMEOUT_SECONDS=45
 ```
 
 В Railway нужно:
@@ -113,17 +134,9 @@ VIKING_REQUEST_TIMEOUT_SECONDS=45
 https://YOUR-DOMAIN.up.railway.app/mcp
 ```
 
-## 4. Подключение Codex
+## 4. Подключение Codex App на Windows
 
-Credentials задаются локально на компьютере пользователя:
-
-```powershell
-setx VIKING_EMAIL "user@example.com"
-setx VIKING_API_KEY "личный API key"
-setx VIKING_ROLE "trader"
-```
-
-После `setx` нужно открыть новое окно терминала.
+Сначала добавьте публичный MCP URL в **Settings → MCP servers → Add server**:
 
 ```toml
 [mcp_servers.viking_marketdata]
@@ -132,13 +145,41 @@ env_http_headers = { "X-Viking-Email" = "VIKING_EMAIL", "X-Viking-API-Key" = "VI
 tool_timeout_sec = 300
 ```
 
-Проверьте:
+Без credentials подключение всё равно успешно: Codex увидит
+`credential_setup`, `list_available_portfolios` и `get_portfolio_data`.
+При первом запросе агент должен предложить два режима и дать ссылку `/setup`.
 
-```bash
-codex mcp list
+### Режим 1: только текущая сессия
+
+1. Полностью закройте Codex App.
+2. Скачайте `/client/windows/viking-session.ps1`.
+3. Запустите:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\viking-session.ps1
 ```
 
-В интерфейсе Codex используйте `/mcp`.
+Скрипт скрыто запросит credentials, запишет MCP-конфигурацию и запустит
+`codex app`. В реестр и файлы credentials не записываются.
+
+### Режим 2: зашифрованный локальный файл
+
+1. Скачайте в одну папку `save-viking-credentials.ps1`,
+   `viking-file.ps1` и `viking-session.ps1`.
+2. Один раз создайте файл:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\save-viking-credentials.ps1
+```
+
+3. Затем запускайте Codex так:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\viking-file.ps1
+```
+
+По умолчанию файл находится в `%USERPROFILE%\.viking-mcp\credentials.json`.
+API key зашифрован DPAPI и доступен только текущей учётной записи Windows.
 
 Любой другой MCP-клиент подключается к тому же публичному URL и должен
 передавать эти три HTTP-заголовка из своего безопасного локального хранилища
@@ -166,6 +207,8 @@ codex mcp list
 - У сервера нет общих Viking email/API key и глобального MCP Bearer-токена.
 - Каждый пользователь работает только со своими credentials.
 - Credentials передаются по HTTPS-заголовкам, не входят в MCP tool arguments и не записываются на диск.
+- Публичный MCP и список инструментов доступны без credentials; сами запросы к Viking без них отклоняются.
+- Неактивные credentials удаляются из RAM Railway через заданный TTL.
 - CSV-ссылки подписаны отдельным инфраструктурным `EXPORT_SIGNING_KEY`, ограничены по времени и не содержат API key.
 - `/health` не раскрывает значения секретов.
 - Сервер предоставляет только read-only tools.
