@@ -24,6 +24,12 @@ async def test_mcp_lists_expected_tools():
         "get_robot_log_updates",
         "unsubscribe_robot_logs",
         "get_robot_log_history",
+        "subscribe_portfolio_deals",
+        "get_portfolio_deal_updates",
+        "unsubscribe_portfolio_deals",
+        "get_previous_portfolio_deals",
+        "get_portfolio_deal_sec_keys",
+        "get_portfolio_deal_history",
         "get_portfolio_data",
     }
     assert tools["subscribe_available_portfolios"].annotations.idempotentHint is False
@@ -40,6 +46,14 @@ async def test_mcp_lists_expected_tools():
     assert tools["get_robot_log_updates"].annotations.idempotentHint is False
     assert tools["unsubscribe_robot_logs"].annotations.idempotentHint is False
     assert tools["get_robot_log_history"].annotations.idempotentHint is True
+    assert tools["subscribe_portfolio_deals"].annotations.idempotentHint is False
+    assert tools["get_portfolio_deal_updates"].annotations.idempotentHint is False
+    assert tools["unsubscribe_portfolio_deals"].annotations.idempotentHint is False
+    assert tools["get_previous_portfolio_deals"].annotations.idempotentHint is True
+    assert tools["get_portfolio_deal_sec_keys"].annotations.idempotentHint is True
+    assert tools["get_portfolio_deal_history"].annotations.idempotentHint is True
+    assert tools["get_previous_portfolio_deals"].inputSchema["properties"]["limit"]["maximum"] == 100
+    assert tools["get_portfolio_deal_history"].inputSchema["properties"]["limit"]["maximum"] == 100_000
     history_schema = tools["get_robot_log_history"].inputSchema["properties"]
     message_filter_string = next(
         option
