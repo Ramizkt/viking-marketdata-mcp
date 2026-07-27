@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -60,6 +61,17 @@ class FakeClient:
             "sell": [{"dt": 2000, "v": 11}, {"dt": 4000, "v": 13}],
         }
         return data[kwargs["key"]]
+
+    async def get_robot_log_history(self, **kwargs):
+        return {
+            "robot_id": kwargs["robot_id"],
+            "mint": kwargs["mint_ns"],
+            "maxt": kwargs["maxt_ns"],
+            "message_filter": kwargs["message_filter"],
+            "limit": kwargs["limit"],
+            "log_count": 1,
+            "logs": [{"msg": "test"}],
+        }
 
 
 @pytest.fixture
@@ -161,3 +173,101 @@ async def test_file_delivery_contains_signed_url(service):
 def test_naive_datetime_is_rejected():
     with pytest.raises(ValueError, match="timezone"):
         MarketDataService._to_epoch_ms(datetime(2026, 1, 1), "date_from")
+
+
+def test_epoch_nsec_conversion_is_exact_and_requires_timezone():
+    value = datetime(2026, 1, 1, 0, 0, 0, 123456, tzinfo=UTC)
+    assert MarketDataService._to_epoch_ns(value, "date_from") == "1767225600123456000"
+
+    with pytest.raises(ValueError, match="timezone"):
+        MarketDataService._to_epoch_ns(datetime(2026, 1, 1), "date_from")
+
+
+async def test_robot_log_history_converts_dates_to_epoch_nsec(service):
+    result = await service.get_robot_log_history(
+        robot_id="1",
+        date_from=datetime(2026, 1, 1, tzinfo=UTC),
+        date_to=datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC),
+        message_filter="*test*",
+        limit=100,
+    )
+
+    assert result["mint"] == "1767225600000000000"
+    assert result["maxt"] == "1767225601000000000"
+    assert result["message_filter"] == "*test*"
+    assert result["date_from"] == "2026-01-01T00:00:00+00:00"
+    assert result["date_to"] == "2026-01-01T00:00:01+00:00"
+
+
+async def test_robot_log_history_rejects_reversed_dates(service):
+    with pytest.raises(ValueError, match="earlier"):
+        await service.get_robot_log_history(
+            robot_id="1",
+            date_from=datetime(2026, 1, 2, tzinfo=UTC),
+            date_to=datetime(2026, 1, 1, tzinfo=UTC),
+            message_filter=None,
+            limit=100,
+        )
+
+
+@pytest.mark.parametrize(
+    ("service_method", "client_method", "kwargs"),
+    [
+        (
+            "subscribe_portfolio_logs",
+            "subscribe_portfolio_logs",
+            {"robot_id": "1", "portfolio": "A"},
+        ),
+        (
+            "unsubscribe_portfolio_logs",
+            "unsubscribe_portfolio_logs",
+            {"subscription_id": "portfolio-logs-sub-1"},
+        ),
+        (
+            "subscribe_robot_logs",
+            "subscribe_robot_logs",
+            {"robot_id": "1"},
+        ),
+        (
+            "unsubscribe_robot_logs",
+            "unsubscribe_robot_logs",
+            {"subscription_id": "robot-logs-sub-1"},
+        ),
+    ],
+)
+async def test_log_service_methods_delegate(service, service_method, client_method, kwargs):
+    mock = AsyncMock(return_value={"ok": True})
+    setattr(service.client, client_method, mock)
+
+    result = await getattr(service, service_method)(**kwargs)
+
+    assert result == {"ok": True}
+    if "subscription_id" in kwargs:
+        mock.assert_awaited_once_with(kwargs["subscription_id"])
+    else:
+        mock.assert_awaited_once_with(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("service_method", "client_method"),
+    [
+        ("get_portfolio_log_updates", "get_portfolio_log_updates"),
+        ("get_robot_log_updates", "get_robot_log_updates"),
+    ],
+)
+async def test_log_update_service_methods_delegate(service, service_method, client_method):
+    mock = AsyncMock(return_value={"event_count": 0})
+    setattr(service.client, client_method, mock)
+
+    result = await getattr(service, service_method)(
+        subscription_id="logs-sub-1",
+        wait_seconds=3,
+        max_events=25,
+    )
+
+    assert result == {"event_count": 0}
+    mock.assert_awaited_once_with(
+        "logs-sub-1",
+        wait_seconds=3,
+        max_events=25,
+    )
