@@ -202,7 +202,7 @@ async def test_get_portfolio_updates_raises_complete_api_error():
     assert error.value.response == response
 
 
-async def test_get_portfolio_updates_rejects_overflowed_buffer():
+async def test_get_available_portfolio_updates_rejects_overflowed_buffer():
     client = object.__new__(VikingClient)
     client._subscriptions = {
         "sub-1": _Subscription(
@@ -270,3 +270,263 @@ async def test_unsubscribe_api_error_keeps_subscription_for_retry():
         await client.unsubscribe_available_portfolios("sub-1")
 
     assert client._subscriptions["sub-1"] is subscription
+
+
+async def test_subscribe_portfolio_preserves_all_dynamic_snapshot_fields():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {}
+    client._subscribe = AsyncMock(
+        return_value={
+            "type": "portfolio.subscribe",
+            "eid": "portfolio-sub-1",
+            "ts": 789,
+            "r": "s",
+            "data": {
+                "r_id": "1",
+                "p_id": "alpha",
+                "value": {
+                    "name": "alpha",
+                    "owner": "owner@example.com",
+                    "buy": 101.5,
+                    "custom_template_field": {"nested": [1, 2, 3]},
+                    "uf0": {"v": 6, "c": "signal"},
+                    "timetable": [{"begin": 36000, "end": 67200}],
+                    "securities": {
+                        "BTCUSDT": {
+                            "sec_key": "BTCUSDT",
+                            "pos": 2,
+                            "custom_security_field": True,
+                        }
+                    },
+                },
+            },
+        }
+    )
+
+    result = await client.subscribe_portfolio(robot_id="1", portfolio="alpha")
+
+    client._subscribe.assert_awaited_once_with(
+        "portfolio.subscribe",
+        {"r_id": "1", "p_id": "alpha"},
+    )
+    assert result["subscription_id"] == "portfolio-sub-1"
+    assert result["active"] is True
+    assert result["robot_id"] == "1"
+    assert result["portfolio"] == "alpha"
+    assert result["value"]["custom_template_field"] == {"nested": [1, 2, 3]}
+    assert result["value"]["uf0"] == {"v": 6, "c": "signal"}
+    assert result["value"]["securities"]["BTCUSDT"]["custom_security_field"] is True
+    assert result["data"]["value"] == result["value"]
+
+
+async def test_subscribe_portfolio_rejects_mismatched_security_key_and_closes():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {
+        "portfolio-sub-1": _Subscription("portfolio.subscribe", asyncio.Queue())
+    }
+    client._subscribe = AsyncMock(
+        return_value={
+            "type": "portfolio.subscribe",
+            "eid": "portfolio-sub-1",
+            "ts": 789,
+            "r": "s",
+            "data": {
+                "r_id": "1",
+                "p_id": "alpha",
+                "value": {
+                    "name": "alpha",
+                    "securities": {"BTCUSDT": {"sec_key": "ETHUSDT"}},
+                },
+            },
+        }
+    )
+    client.close = AsyncMock()
+
+    with pytest.raises(VikingProtocolError, match="does not match"):
+        await client.subscribe_portfolio(robot_id="1", portfolio="alpha")
+
+    assert "portfolio-sub-1" not in client._subscriptions
+    client.close.assert_awaited_once()
+
+
+async def test_get_portfolio_updates_preserves_partial_dynamic_fields():
+    client = object.__new__(VikingClient)
+    queue = asyncio.Queue()
+    await queue.put(
+        {
+            "type": "portfolio.subscribe",
+            "eid": "portfolio-sub-1",
+            "ts": 790,
+            "r": "u",
+            "data": {
+                "r_id": "1",
+                "p_id": "alpha",
+                "value": {
+                    "name": "alpha",
+                    "uf0": {"v": 7},
+                    "securities": {
+                        "BTCUSDT": {
+                            "sec_key": "BTCUSDT",
+                            "pos": 3,
+                        }
+                    },
+                },
+            },
+        }
+    )
+    client._subscriptions = {
+        "portfolio-sub-1": _Subscription(
+            "portfolio.subscribe",
+            queue,
+            request_data={"r_id": "1", "p_id": "alpha"},
+        )
+    }
+
+    result = await client.get_portfolio_updates("portfolio-sub-1")
+
+    assert result["event_count"] == 1
+    assert result["active"] is True
+    assert result["events"][0]["value"]["uf0"] == {"v": 7}
+    assert result["events"][0]["value"]["securities"]["BTCUSDT"]["pos"] == 3
+
+
+async def test_get_portfolio_updates_marks_deleted_portfolio_inactive():
+    client = object.__new__(VikingClient)
+    queue = asyncio.Queue()
+    await queue.put(
+        {
+            "type": "portfolio.subscribe",
+            "eid": "portfolio-sub-1",
+            "ts": 791,
+            "r": "u",
+            "data": {
+                "r_id": "1",
+                "p_id": "alpha",
+                "value": {
+                    "name": "alpha",
+                    "owner": "owner@example.com",
+                    "__action": "del",
+                },
+            },
+        }
+    )
+    client._subscriptions = {
+        "portfolio-sub-1": _Subscription(
+            "portfolio.subscribe",
+            queue,
+            request_data={"r_id": "1", "p_id": "alpha"},
+        )
+    }
+
+    result = await client.get_portfolio_updates("portfolio-sub-1")
+
+    assert result["events"][0]["deleted"] is True
+    assert result["active"] is False
+    assert "portfolio-sub-1" not in client._subscriptions
+
+
+async def test_get_portfolio_updates_raises_complete_api_error_and_deactivates():
+    client = object.__new__(VikingClient)
+    queue = asyncio.Queue()
+    response = {
+        "type": "portfolio.subscribe",
+        "eid": "portfolio-sub-1",
+        "ts": 791,
+        "r": "e",
+        "data": {"msg": "Permission denied", "code": 555},
+    }
+    await queue.put(response)
+    client._subscriptions = {
+        "portfolio-sub-1": _Subscription(
+            "portfolio.subscribe",
+            queue,
+            request_data={"r_id": "1", "p_id": "alpha"},
+        )
+    }
+
+    with pytest.raises(VikingAPIError, match="Permission denied") as error:
+        await client.get_portfolio_updates("portfolio-sub-1")
+
+    assert error.value.code == 555
+    assert error.value.response == response
+    assert "portfolio-sub-1" not in client._subscriptions
+
+
+async def test_get_selected_portfolio_updates_rejects_overflowed_buffer():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {
+        "portfolio-sub-1": _Subscription(
+            "portfolio.subscribe",
+            asyncio.Queue(),
+            overflowed=True,
+            request_data={"r_id": "1", "p_id": "alpha"},
+        )
+    }
+
+    with pytest.raises(VikingProtocolError, match="events were lost"):
+        await client.get_portfolio_updates("portfolio-sub-1")
+
+
+async def test_unsubscribe_portfolio_sends_subscription_eid_and_returns_ack():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {
+        "portfolio-sub-1": _Subscription("portfolio.subscribe", asyncio.Queue())
+    }
+    client.request = AsyncMock(
+        return_value={
+            "type": "portfolio.unsubscribe",
+            "eid": "request-2",
+            "ts": 792,
+            "r": "p",
+            "data": {},
+        }
+    )
+
+    result = await client.unsubscribe_portfolio("portfolio-sub-1")
+
+    client.request.assert_awaited_once_with(
+        "portfolio.unsubscribe",
+        {"sub_eid": "portfolio-sub-1"},
+    )
+    assert result["unsubscribed"] is True
+    assert result["r"] == "p"
+    assert "portfolio-sub-1" not in client._subscriptions
+
+
+async def test_unsubscribe_portfolio_api_error_keeps_subscription_for_retry():
+    client = object.__new__(VikingClient)
+    subscription = _Subscription("portfolio.subscribe", asyncio.Queue())
+    client._subscriptions = {"portfolio-sub-1": subscription}
+    client.request = AsyncMock(side_effect=VikingAPIError("Operation timeout", 666))
+
+    with pytest.raises(VikingAPIError, match="Operation timeout"):
+        await client.unsubscribe_portfolio("portfolio-sub-1")
+
+    assert client._subscriptions["portfolio-sub-1"] is subscription
+
+
+async def test_get_current_portfolio_data_unsubscribes_immediately():
+    client = object.__new__(VikingClient)
+    client.subscribe_portfolio = AsyncMock(
+        return_value={
+            "subscription_id": "portfolio-sub-1",
+            "active": True,
+            "value": {"name": "alpha", "securities": {}},
+        }
+    )
+    client.unsubscribe_portfolio = AsyncMock(
+        return_value={"subscription_id": "portfolio-sub-1", "unsubscribed": True}
+    )
+
+    result = await client.get_current_portfolio_data(
+        robot_id="1",
+        portfolio="alpha",
+    )
+
+    client.subscribe_portfolio.assert_awaited_once_with(
+        robot_id="1",
+        portfolio="alpha",
+    )
+    client.unsubscribe_portfolio.assert_awaited_once_with("portfolio-sub-1")
+    assert result["active"] is False
+    assert result["unsubscribed"] is True
