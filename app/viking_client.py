@@ -750,6 +750,239 @@ class VikingClient:
             "logs": logs,
         }
 
+    async def subscribe_portfolio_deals(
+        self, *, robot_id: str, portfolio: str
+    ) -> dict[str, Any]:
+        """Subscribe to portfolio deals and return the initial snapshot."""
+        if not robot_id:
+            raise ValueError("robot_id must not be empty")
+        if not portfolio:
+            raise ValueError("portfolio must not be empty")
+        response = await self._subscribe(
+            "portfolio_deals.subscribe", {"r_id": robot_id, "p_id": portfolio}
+        )
+        subscription_id = self._required_str(response, "eid")
+        try:
+            event = self._parse_deal_event(
+                response,
+                subscription_id=subscription_id,
+                expected_robot_id=robot_id,
+                expected_portfolio=portfolio,
+                allowed_results={"s"},
+                require_max_time=True,
+            )
+            return {"subscription_id": subscription_id, "active": True, **event}
+        except BaseException:
+            self._subscriptions.pop(subscription_id, None)
+            await self.close()
+            raise
+
+    async def get_portfolio_deal_updates(
+        self,
+        subscription_id: str,
+        *,
+        wait_seconds: float = 0,
+        max_events: int = 100,
+    ) -> dict[str, Any]:
+        """Return buffered updates for an active portfolio-deal subscription."""
+        subscription = self._subscriptions.get(subscription_id)
+        expected_type = "portfolio_deals.subscribe"
+        if subscription is None or subscription.message_type != expected_type:
+            raise ValueError("Unknown or inactive portfolio-deals subscription_id")
+        if subscription.overflowed:
+            raise VikingProtocolError(
+                "Portfolio-deals subscription buffer overflowed and events were lost; "
+                "unsubscribe and create a new subscription"
+            )
+        if not 0 <= wait_seconds <= 30:
+            raise ValueError("wait_seconds must be in range 0..30")
+        if not 1 <= max_events <= 500:
+            raise ValueError("max_events must be in range 1..500")
+        request_data = subscription.request_data or {}
+        robot_id = request_data.get("r_id")
+        portfolio = request_data.get("p_id")
+        if not isinstance(robot_id, str) or not isinstance(portfolio, str):
+            raise VikingProtocolError("Portfolio-deals subscription metadata is incomplete")
+
+        messages: list[dict[str, Any]] = []
+        if wait_seconds and subscription.queue.empty():
+            with contextlib.suppress(TimeoutError):
+                messages.append(
+                    await asyncio.wait_for(subscription.queue.get(), timeout=wait_seconds)
+                )
+        while len(messages) < max_events:
+            try:
+                messages.append(subscription.queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+
+        events = []
+        for message in messages:
+            if message.get("r") == "e":
+                self._subscriptions.pop(subscription_id, None)
+                self._raise_api_error(message)
+            try:
+                events.append(
+                    self._parse_deal_event(
+                        message,
+                        subscription_id=subscription_id,
+                        expected_robot_id=robot_id,
+                        expected_portfolio=portfolio,
+                        allowed_results={"s", "u"},
+                        require_max_time=message.get("r") == "s",
+                    )
+                )
+            except VikingProtocolError:
+                self._subscriptions.pop(subscription_id, None)
+                await self.close()
+                raise
+        active = subscription_id in self._subscriptions
+        return {
+            "subscription_id": subscription_id,
+            "event_count": len(events),
+            "events": events,
+            "active": active,
+            "more_available": active and not subscription.queue.empty(),
+        }
+
+    async def unsubscribe_portfolio_deals(self, subscription_id: str) -> dict[str, Any]:
+        """Unsubscribe from portfolio deals using the subscription eid."""
+        return await self._unsubscribe_log_subscription(
+            subscription_id,
+            expected_subscribe_type="portfolio_deals.subscribe",
+            unsubscribe_type="portfolio_deals.unsubscribe",
+        )
+
+    async def get_previous_portfolio_deals(
+        self,
+        *,
+        robot_id: str,
+        portfolio: str,
+        before_ns: str,
+        security_key: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Return deals older than the specified epoch-nanosecond timestamp."""
+        self._validate_deal_request(robot_id, portfolio, security_key)
+        self._validate_epoch_nsec_bound(before_ns, "before_ns")
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be in range 1..100")
+        data: dict[str, Any] = {
+            "r_id": robot_id, "p_id": portfolio, "mt": before_ns, "lim": limit
+        }
+        if security_key is not None:
+            data["sec_key"] = security_key
+        return await self._get_portfolio_deals_response(
+            "portfolio_deals.get_previous", data, robot_id, portfolio,
+            security_key=security_key, limit=limit
+        )
+
+    async def get_portfolio_deal_sec_keys(
+        self, *, robot_id: str, portfolio: str
+    ) -> dict[str, Any]:
+        """Return unique security keys from portfolio deal history."""
+        self._validate_deal_request(robot_id, portfolio, None)
+        response = await self.request(
+            "portfolio_deals.get_sec_keys", {"r_id": robot_id, "p_id": portfolio}
+        )
+        result = self._required_str(response, "r")
+        if result != "p":
+            raise VikingProtocolError(
+                "portfolio_deals.get_sec_keys returned an unexpected result; expected r='p'"
+            )
+        data = self._required_dict(response, "data")
+        values = data.get("values")
+        if not isinstance(values, list) or any(not isinstance(item, str) for item in values):
+            raise VikingProtocolError("Deal sec_keys response field 'values' must be an array of strings")
+        return {
+            "type": self._required_str(response, "type"),
+            "eid": self._required_str(response, "eid"),
+            "ts": self._required_int(response, "ts"),
+            "r": result,
+            "result": result,
+            "data": {**data, "values": values},
+            "robot_id": robot_id,
+            "portfolio": portfolio,
+            "security_count": len(values),
+            "security_keys": values,
+        }
+
+    async def get_portfolio_deal_history(
+        self,
+        *,
+        robot_id: str,
+        portfolio: str,
+        mint_ns: str,
+        maxt_ns: str,
+        security_key: str | None = None,
+        limit: int = 100_000,
+    ) -> dict[str, Any]:
+        """Return portfolio deals inside inclusive epoch-nanosecond bounds."""
+        self._validate_deal_request(robot_id, portfolio, security_key)
+        self._validate_epoch_nsec_bound(mint_ns, "mint_ns")
+        self._validate_epoch_nsec_bound(maxt_ns, "maxt_ns")
+        if int(mint_ns) > int(maxt_ns):
+            raise ValueError("mint_ns must not be later than maxt_ns")
+        if not 1 <= limit <= 100_000:
+            raise ValueError("limit must be in range 1..100000")
+        data: dict[str, Any] = {
+            "r_id": robot_id, "p_id": portfolio,
+            "mint": mint_ns, "maxt": maxt_ns, "lim": limit,
+        }
+        if security_key is not None:
+            data["sec_key"] = security_key
+        return await self._get_portfolio_deals_response(
+            "portfolio_deals.get_history", data, robot_id, portfolio,
+            security_key=security_key, limit=limit
+        )
+
+    async def _get_portfolio_deals_response(
+        self,
+        message_type: str,
+        request_data: dict[str, Any],
+        robot_id: str,
+        portfolio: str,
+        *,
+        security_key: str | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        response = await self.request(message_type, request_data)
+        result = self._required_str(response, "r")
+        if result != "p":
+            raise VikingProtocolError(
+                f"{message_type} returned an unexpected result; expected r='p'"
+            )
+        data = self._required_dict(response, "data")
+        deals = self._parse_deal_rows(
+            data.get("values"), expected_robot_id=robot_id,
+            expected_portfolio=portfolio, expected_security_key=security_key
+        )
+        return {
+            "type": self._required_str(response, "type"),
+            "eid": self._required_str(response, "eid"),
+            "ts": self._required_int(response, "ts"),
+            "r": result,
+            "result": result,
+            "data": {**data, "values": deals},
+            "robot_id": robot_id,
+            "portfolio": portfolio,
+            "security_key": security_key,
+            "limit": limit,
+            "deal_count": len(deals),
+            "deals": deals,
+        }
+
+    @staticmethod
+    def _validate_deal_request(
+        robot_id: str, portfolio: str, security_key: str | None
+    ) -> None:
+        if not robot_id:
+            raise ValueError("robot_id must not be empty")
+        if not portfolio:
+            raise ValueError("portfolio must not be empty")
+        if security_key is not None and not security_key:
+            raise ValueError("security_key must not be empty")
+
     async def get_portfolio_history(
         self,
         *,
@@ -1329,6 +1562,106 @@ class VikingClient:
         if max_time is not None:
             event["max_time"] = max_time
         return event
+
+    @classmethod
+    def _parse_deal_event(
+        cls,
+        response: dict[str, Any],
+        *,
+        subscription_id: str,
+        expected_robot_id: str,
+        expected_portfolio: str,
+        allowed_results: set[str],
+        require_max_time: bool,
+    ) -> dict[str, Any]:
+        cls._validate_response_identity(
+            response,
+            expected_type="portfolio_deals.subscribe",
+            expected_eid=subscription_id,
+        )
+        result = cls._required_str(response, "r")
+        if result not in allowed_results:
+            raise VikingProtocolError(
+                f"portfolio_deals.subscribe returned unexpected r={result!r}"
+            )
+        source_data = cls._required_dict(response, "data")
+        robot_id = cls._required_str(source_data, "r_id")
+        portfolio = cls._required_str(source_data, "p_id")
+        if robot_id != expected_robot_id or portfolio != expected_portfolio:
+            raise VikingProtocolError("Unexpected portfolio-deals subscription identity")
+        deals = cls._parse_deal_rows(
+            source_data.get("values"),
+            expected_robot_id=expected_robot_id,
+            expected_portfolio=expected_portfolio,
+            expected_security_key=None,
+        )
+        max_time = None
+        if require_max_time or "mt" in source_data:
+            max_time = cls._required_epoch_nsec(source_data, "mt")
+        event = {
+            "type": cls._required_str(response, "type"),
+            "eid": cls._required_str(response, "eid"),
+            "ts": cls._required_int(response, "ts"),
+            "r": result,
+            "result": result,
+            "data": {**source_data, "values": deals},
+            "robot_id": robot_id,
+            "portfolio": portfolio,
+            "deal_count": len(deals),
+            "deals": deals,
+        }
+        if max_time is not None:
+            event["max_time"] = max_time
+        return event
+
+    @classmethod
+    def _parse_deal_rows(
+        cls,
+        value: Any,
+        *,
+        expected_robot_id: str,
+        expected_portfolio: str,
+        expected_security_key: str | None,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            raise VikingProtocolError("Deal response field 'values' must be an array")
+        deals: list[dict[str, Any]] = []
+        for index, item in enumerate(value):
+            if not isinstance(item, dict):
+                raise VikingProtocolError(f"Deal values[{index}] must be an object")
+            for field in ("id", "cn", "sec"):
+                cls._required_str(item, field)
+            ono = item.get("ono")
+            if isinstance(ono, bool) or not isinstance(ono, (str, int)):
+                raise VikingProtocolError(
+                    f"Deal values[{index}].ono must be a string or integer"
+                )
+            cls._required_epoch_nsec(item, "dt")
+            for field in (
+                "price", "orig_price", "buy_sell", "quantity",
+                "decimals", "curpos", "lot_size",
+            ):
+                value_ = item.get(field)
+                if isinstance(value_, bool) or not isinstance(value_, (int, float)):
+                    raise VikingProtocolError(
+                        f"Deal values[{index}].{field} must be a number"
+                    )
+            row_robot_id = item.get("r_id")
+            if row_robot_id is not None and row_robot_id != expected_robot_id:
+                raise VikingProtocolError(
+                    f"Unexpected deal values[{index}].r_id {row_robot_id!r}"
+                )
+            name = item.get("name")
+            if name is not None and name != expected_portfolio:
+                raise VikingProtocolError(
+                    f"Unexpected deal values[{index}].name {name!r}"
+                )
+            if expected_security_key is not None and item["sec"] != expected_security_key:
+                raise VikingProtocolError(
+                    f"Unexpected deal values[{index}].sec {item['sec']!r}"
+                )
+            deals.append(dict(item))
+        return deals
 
     @classmethod
     def _parse_log_rows(
