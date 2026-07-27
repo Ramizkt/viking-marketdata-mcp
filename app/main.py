@@ -41,12 +41,15 @@ mcp = FastMCP(
     instructions=(
         "Пользователь уже прошёл безопасную браузерную OAuth-авторизацию. Никогда не проси "
         "email или API key в чате. Сначала вызывай list_available_portfolios. "
-        "Для выгрузки выбирай портфель с "
-        "history_available=true. В get_portfolio_data даты всегда передавай с часовым поясом. "
+        "Текущее полное состояние портфеля получай через get_current_portfolio_data. "
+        "Для исторической выгрузки выбирай портфель с history_available=true; "
+        "в get_portfolio_data даты всегда передавай с часовым поясом. "
         "Используй delivery=auto: небольшие выборки вернутся inline, большие — CSV-файлом. "
         "Если пользователь просит следить за изменениями списка портфелей, вызови "
         "subscribe_available_portfolios, читай события через get_available_portfolio_updates "
         "и обязательно заверши подписку через unsubscribe_available_portfolios. "
+        "Для изменений полей одного портфеля используй subscribe_portfolio, "
+        "get_portfolio_updates и unsubscribe_portfolio. "
         "Если пользователь не назвал поля, используй buy, sell и pos. Сервер только читает данные. "
         "Credentials не входят в аргументы MCP-инструментов."
     ),
@@ -215,6 +218,140 @@ async def unsubscribe_available_portfolios(
         return _error_result(exc)
     return CallToolResult(
         content=[TextContent(type="text", text="Подписка успешно закрыта.")],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Текущие данные портфеля",
+    description=(
+        "Возвращает полный текущий снапшот портфеля через Viking portfolio.subscribe и сразу "
+        "закрывает служебную подписку через portfolio.unsubscribe. Сохраняет без фильтрации "
+        "все поля шаблона портфеля, uf0..uf19, timetable и все поля securities."
+    ),
+    annotations=READ_ONLY,
+)
+async def get_current_portfolio_data(
+    robot_id: Annotated[str, Field(min_length=1, description="Идентификатор робота")],
+    portfolio: Annotated[str, Field(min_length=1, description="Имя портфеля")],
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().get_current_portfolio_data(
+            robot_id=robot_id,
+            portfolio=portfolio,
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Current portfolio data request failed: %s", exc)
+        return _error_result(exc)
+    securities = result["value"].get("securities", {})
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=(
+                    f"Получен текущий снапшот {robot_id}/{portfolio}: "
+                    f"{len(result['value'])} полей, {len(securities)} инструментов."
+                ),
+            )
+        ],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Подписаться на портфель",
+    description=(
+        "Создаёт read-only подписку Viking portfolio.subscribe и возвращает полный начальный "
+        "снапшот со всеми динамическими полями портфеля и его securities. Сохрани "
+        "subscription_id для чтения обновлений и явной отписки."
+    ),
+    annotations=SUBSCRIPTION_TOOL,
+)
+async def subscribe_portfolio(
+    robot_id: Annotated[str, Field(min_length=1, description="Идентификатор робота")],
+    portfolio: Annotated[str, Field(min_length=1, description="Имя портфеля")],
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().subscribe_portfolio(
+            robot_id=robot_id,
+            portfolio=portfolio,
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Portfolio subscription failed: %s", exc)
+        return _error_result(exc)
+    securities = result["value"].get("securities", {})
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=(
+                    f"Подписка на {robot_id}/{portfolio} создана. "
+                    f"Получено полей: {len(result['value'])}; "
+                    f"инструментов: {len(securities)}."
+                ),
+            )
+        ],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Получить обновления портфеля",
+    description=(
+        "Возвращает накопленные снапшоты и частичные обновления активной portfolio.subscribe. "
+        "Сохраняет все неизвестные заранее поля, частичные uf0..uf19, изменения securities "
+        "и __action=del. wait_seconds=0 проверяет сразу, максимум ожидания — 30 секунд."
+    ),
+    annotations=SUBSCRIPTION_TOOL,
+)
+async def get_portfolio_updates(
+    subscription_id: Annotated[str, Field(min_length=1)],
+    wait_seconds: Annotated[float, Field(ge=0, le=30)] = 0,
+    max_events: Annotated[int, Field(ge=1, le=500)] = 100,
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().get_portfolio_updates(
+            subscription_id=subscription_id,
+            wait_seconds=wait_seconds,
+            max_events=max_events,
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Reading portfolio updates failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=(
+                    f"Получено событий портфеля: {result['event_count']}. "
+                    f"Подписка активна: {result['active']}."
+                ),
+            )
+        ],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Отписаться от портфеля",
+    description=(
+        "Вызывает Viking portfolio.unsubscribe для указанного subscription_id и возвращает "
+        "полный ответ API."
+    ),
+    annotations=SUBSCRIPTION_TOOL,
+)
+async def unsubscribe_portfolio(
+    subscription_id: Annotated[str, Field(min_length=1)],
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().unsubscribe_portfolio(
+            subscription_id=subscription_id
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Portfolio unsubscribe failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[TextContent(type="text", text="Подписка на портфель успешно закрыта.")],
         structuredContent=result,
     )
 
