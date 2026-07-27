@@ -662,3 +662,457 @@ async def test_get_template_id_rejects_malformed_success_response():
             view="portfolio",
             object_id={"r_id": "1", "p_id": "alpha"},
         )
+
+
+async def test_subscribe_portfolio_logs_uses_documented_identity_and_preserves_fields():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {}
+    client._subscribe = AsyncMock(
+        return_value={
+            "type": "portfolio_logs.subscribe",
+            "eid": "portfolio-logs-sub-1",
+            "ts": 900,
+            "r": "s",
+            "data": {
+                "mt": 1671194446799559398,
+                "r_id": "1",
+                "p_id": "alpha",
+                "values": [
+                    {
+                        "level": 5,
+                        "name": "alpha",
+                        "owner": "",
+                        "msg": "with owner",
+                        "t": 1671194458000035338,
+                        "dt": 1671194458000994686,
+                        "custom": {"preserved": True},
+                    }
+                ],
+            },
+        }
+    )
+
+    result = await client.subscribe_portfolio_logs(robot_id="1", portfolio="alpha")
+
+    client._subscribe.assert_awaited_once_with(
+        "portfolio_logs.subscribe",
+        {"r_id": "1", "p_id": "alpha"},
+    )
+    assert result["subscription_id"] == "portfolio-logs-sub-1"
+    assert result["active"] is True
+    assert result["robot_id"] == "1"
+    assert result["portfolio"] == "alpha"
+    assert result["max_time"] == 1671194446799559398
+    assert result["logs"][0]["custom"] == {"preserved": True}
+
+
+async def test_subscribe_portfolio_logs_rejects_mismatched_portfolio_and_closes():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {
+        "portfolio-logs-sub-1": _Subscription(
+            "portfolio_logs.subscribe",
+            asyncio.Queue(),
+        )
+    }
+    client._subscribe = AsyncMock(
+        return_value={
+            "type": "portfolio_logs.subscribe",
+            "eid": "portfolio-logs-sub-1",
+            "ts": 900,
+            "r": "s",
+            "data": {
+                "mt": 1,
+                "r_id": "1",
+                "p_id": "other",
+                "values": [],
+            },
+        }
+    )
+    client.close = AsyncMock()
+
+    with pytest.raises(VikingProtocolError, match="p_id"):
+        await client.subscribe_portfolio_logs(robot_id="1", portfolio="alpha")
+
+    assert "portfolio-logs-sub-1" not in client._subscriptions
+    client.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("method_name", "kwargs"),
+    [
+        (
+            "subscribe_portfolio_logs",
+            {"robot_id": "1", "portfolio": "alpha"},
+        ),
+        ("subscribe_robot_logs", {"robot_id": "1"}),
+    ],
+)
+async def test_log_subscribe_preserves_complete_api_error(method_name, kwargs):
+    client = object.__new__(VikingClient)
+    error = VikingAPIError(
+        "Permission denied",
+        555,
+        response={
+            "type": "robot_logs.subscribe",
+            "eid": "logs-sub-1",
+            "ts": 900,
+            "r": "e",
+            "data": {"msg": "Permission denied", "code": 555},
+        },
+    )
+    client._subscribe = AsyncMock(side_effect=error)
+
+    with pytest.raises(VikingAPIError, match="Permission denied") as raised:
+        await getattr(client, method_name)(**kwargs)
+
+    assert raised.value.code == 555
+    assert raised.value.response == error.response
+
+
+async def test_subscribe_robot_logs_accepts_documented_snapshot():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {}
+    client._subscribe = AsyncMock(
+        return_value={
+            "type": "robot_logs.subscribe",
+            "eid": "robot-logs-sub-1",
+            "ts": 901,
+            "r": "s",
+            "data": {
+                "mt": 1671195116000769082,
+                "r_id": "1",
+                "values": [
+                    {
+                        "level": 5,
+                        "name": "",
+                        "owner": "1",
+                        "msg": "without name",
+                        "t": 1671195119000062295,
+                        "dt": 1671195119001430926,
+                        "r_id": "1",
+                    }
+                ],
+            },
+        }
+    )
+
+    result = await client.subscribe_robot_logs(robot_id="1")
+
+    client._subscribe.assert_awaited_once_with(
+        "robot_logs.subscribe",
+        {"r_id": "1"},
+    )
+    assert result["subscription_id"] == "robot-logs-sub-1"
+    assert result["log_count"] == 1
+    assert result["logs"][0]["r_id"] == "1"
+
+
+async def test_get_robot_log_updates_accepts_rows_omitted_by_api_example():
+    client = object.__new__(VikingClient)
+    queue = asyncio.Queue()
+    await queue.put(
+        {
+            "type": "robot_logs.subscribe",
+            "eid": "robot-logs-sub-1",
+            "ts": 902,
+            "r": "u",
+            "data": {
+                "r_id": "1",
+                "values": [
+                    {
+                        "level": 2,
+                        "owner": None,
+                        "msg": "calculation warning",
+                        "t": 1671195121000031284,
+                        "dt": 1671195121001134808,
+                        "dynamic": ["kept"],
+                    }
+                ],
+            },
+        }
+    )
+    client._subscriptions = {
+        "robot-logs-sub-1": _Subscription(
+            "robot_logs.subscribe",
+            queue,
+            request_data={"r_id": "1"},
+        )
+    }
+
+    result = await client.get_robot_log_updates("robot-logs-sub-1")
+
+    assert result["event_count"] == 1
+    assert result["active"] is True
+    assert result["events"][0]["logs"][0]["dynamic"] == ["kept"]
+
+
+async def test_get_robot_log_updates_rejects_malformed_required_log_field():
+    client = object.__new__(VikingClient)
+    queue = asyncio.Queue()
+    await queue.put(
+        {
+            "type": "robot_logs.subscribe",
+            "eid": "robot-logs-sub-1",
+            "ts": 902,
+            "r": "u",
+            "data": {
+                "r_id": "1",
+                "values": [
+                    {
+                        "level": 2,
+                        "msg": "missing t",
+                        "dt": 1671195121001134808,
+                    }
+                ],
+            },
+        }
+    )
+    client._subscriptions = {
+        "robot-logs-sub-1": _Subscription(
+            "robot_logs.subscribe",
+            queue,
+            request_data={"r_id": "1"},
+        )
+    }
+    client.close = AsyncMock()
+
+    with pytest.raises(VikingProtocolError, match="'t'"):
+        await client.get_robot_log_updates("robot-logs-sub-1")
+
+    assert "robot-logs-sub-1" not in client._subscriptions
+    client.close.assert_awaited_once()
+
+
+async def test_get_portfolio_log_updates_raises_api_error_and_deactivates():
+    client = object.__new__(VikingClient)
+    queue = asyncio.Queue()
+    response = {
+        "type": "portfolio_logs.subscribe",
+        "eid": "portfolio-logs-sub-1",
+        "ts": 903,
+        "r": "e",
+        "data": {"msg": "Permission denied", "code": 555},
+    }
+    await queue.put(response)
+    client._subscriptions = {
+        "portfolio-logs-sub-1": _Subscription(
+            "portfolio_logs.subscribe",
+            queue,
+            request_data={"r_id": "1", "p_id": "alpha"},
+        )
+    }
+
+    with pytest.raises(VikingAPIError, match="Permission denied") as error:
+        await client.get_portfolio_log_updates("portfolio-logs-sub-1")
+
+    assert error.value.code == 555
+    assert error.value.response == response
+    assert "portfolio-logs-sub-1" not in client._subscriptions
+
+
+async def test_get_robot_log_updates_rejects_overflowed_buffer():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {
+        "robot-logs-sub-1": _Subscription(
+            "robot_logs.subscribe",
+            asyncio.Queue(),
+            overflowed=True,
+            request_data={"r_id": "1"},
+        )
+    }
+
+    with pytest.raises(VikingProtocolError, match="events were lost"):
+        await client.get_robot_log_updates("robot-logs-sub-1")
+
+
+@pytest.mark.parametrize(
+    ("subscribe_type", "unsubscribe_type", "method_name"),
+    [
+        (
+            "portfolio_logs.subscribe",
+            "portfolio_logs.unsubscribe",
+            "unsubscribe_portfolio_logs",
+        ),
+        (
+            "robot_logs.subscribe",
+            "robot_logs.unsubscribe",
+            "unsubscribe_robot_logs",
+        ),
+    ],
+)
+async def test_log_unsubscribe_uses_subscription_eid(
+    subscribe_type,
+    unsubscribe_type,
+    method_name,
+):
+    client = object.__new__(VikingClient)
+    client._subscriptions = {
+        "logs-sub-1": _Subscription(subscribe_type, asyncio.Queue())
+    }
+    client.request = AsyncMock(
+        return_value={
+            "type": unsubscribe_type,
+            "eid": "unsubscribe-request-1",
+            "ts": 904,
+            "r": "p",
+            "data": {},
+        }
+    )
+
+    result = await getattr(client, method_name)("logs-sub-1")
+
+    client.request.assert_awaited_once_with(
+        unsubscribe_type,
+        {"sub_eid": "logs-sub-1"},
+    )
+    assert result["unsubscribed"] is True
+    assert result["subscription_id"] == "logs-sub-1"
+    assert "logs-sub-1" not in client._subscriptions
+
+
+async def test_log_unsubscribe_api_error_keeps_subscription_for_retry():
+    client = object.__new__(VikingClient)
+    subscription = _Subscription("robot_logs.subscribe", asyncio.Queue())
+    client._subscriptions = {"robot-logs-sub-1": subscription}
+    client.request = AsyncMock(side_effect=VikingAPIError("Operation timeout", 666))
+
+    with pytest.raises(VikingAPIError, match="Operation timeout"):
+        await client.unsubscribe_robot_logs("robot-logs-sub-1")
+
+    assert client._subscriptions["robot-logs-sub-1"] is subscription
+
+
+async def test_log_unsubscribe_unexpected_result_keeps_subscription():
+    client = object.__new__(VikingClient)
+    subscription = _Subscription("robot_logs.subscribe", asyncio.Queue())
+    client._subscriptions = {"robot-logs-sub-1": subscription}
+    client.request = AsyncMock(
+        return_value={
+            "type": "robot_logs.unsubscribe",
+            "eid": "unsubscribe-request-1",
+            "ts": 904,
+            "r": "u",
+            "data": {},
+        }
+    )
+
+    with pytest.raises(VikingProtocolError, match="expected r='p'"):
+        await client.unsubscribe_robot_logs("robot-logs-sub-1")
+
+    assert client._subscriptions["robot-logs-sub-1"] is subscription
+
+
+async def test_get_robot_log_history_sends_epoch_nsec_strings_and_preserves_rows():
+    client = object.__new__(VikingClient)
+    client.request = AsyncMock(
+        return_value={
+            "type": "robot_logs.get_history",
+            "eid": "history-request-1",
+            "ts": 905,
+            "r": "p",
+            "data": {
+                "values": [
+                    {
+                        "dt": "1677586103000245321",
+                        "r_id": "1",
+                        "name": "alpha",
+                        "level": 1,
+                        "msg": 'Compilation on "alpha" is OK',
+                        "owner": "",
+                        "dynamic": {"preserved": True},
+                    }
+                ]
+            },
+        }
+    )
+
+    result = await client.get_robot_log_history(
+        robot_id="1",
+        mint_ns="1677586000000000000",
+        maxt_ns="1677587000000000000",
+        message_filter="*alpha*",
+        limit=100,
+    )
+
+    client.request.assert_awaited_once_with(
+        "robot_logs.get_history",
+        {
+            "r_id": "1",
+            "mint": "1677586000000000000",
+            "maxt": "1677587000000000000",
+            "lim": 100,
+            "msg": "*alpha*",
+        },
+    )
+    assert result["result"] == "p"
+    assert result["log_count"] == 1
+    assert result["logs"][0]["dt"] == "1677586103000245321"
+    assert result["logs"][0]["dynamic"] == {"preserved": True}
+
+
+async def test_get_robot_log_history_rejects_mismatched_row_robot_id():
+    client = object.__new__(VikingClient)
+    client.request = AsyncMock(
+        return_value={
+            "type": "robot_logs.get_history",
+            "eid": "history-request-1",
+            "ts": 905,
+            "r": "p",
+            "data": {
+                "values": [
+                    {
+                        "dt": 1677586103000245321,
+                        "r_id": "2",
+                        "name": "alpha",
+                        "level": 1,
+                        "msg": "wrong robot",
+                    }
+                ]
+            },
+        }
+    )
+
+    with pytest.raises(VikingProtocolError, match="r_id"):
+        await client.get_robot_log_history(
+            robot_id="1",
+            mint_ns="1",
+            maxt_ns="2000000000000000000",
+        )
+
+
+async def test_get_robot_log_history_rejects_unexpected_result():
+    client = object.__new__(VikingClient)
+    client.request = AsyncMock(
+        return_value={
+            "type": "robot_logs.get_history",
+            "eid": "history-request-1",
+            "ts": 905,
+            "r": "u",
+            "data": {"values": []},
+        }
+    )
+
+    with pytest.raises(VikingProtocolError, match="expected r='p'"):
+        await client.get_robot_log_history(
+            robot_id="1",
+            mint_ns="1",
+            maxt_ns="2",
+        )
+
+
+async def test_get_robot_log_history_rejects_invalid_bounds_and_filter():
+    client = object.__new__(VikingClient)
+
+    with pytest.raises(ValueError, match="digit string"):
+        await client.get_robot_log_history(
+            robot_id="1",
+            mint_ns="2026-01-01",
+            maxt_ns="2",
+        )
+    with pytest.raises(ValueError, match="256"):
+        await client.get_robot_log_history(
+            robot_id="1",
+            mint_ns="1",
+            maxt_ns="2",
+            message_filter="x" * 257,
+        )
