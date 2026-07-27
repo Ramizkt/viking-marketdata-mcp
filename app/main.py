@@ -58,7 +58,10 @@ mcp = FastMCP(
         "Для сделок отдельных инструментов портфеля используй subscribe_portfolio_deals, "
         "get_portfolio_deal_updates и unsubscribe_portfolio_deals; доступные инструменты "
         "получай через get_portfolio_deal_sec_keys, историю — через "
-        "get_portfolio_deal_history или get_previous_portfolio_deals. "
+        "get_portfolio_deal_history или get_previous_portfolio_deals. Во всех ответах со сделками "
+        "aggr=false означает обычную биржевую сделку. aggr=true означает синтетическую "
+        "агрегированную запись: price в ней равна цене исходной заявки и не является "
+        "фактической ценой отдельного исполнения. "
         "Если пользователь не назвал поля, используй buy, sell и pos. Сервер только читает данные. "
         "Credentials не входят в аргументы MCP-инструментов."
     ),
@@ -642,7 +645,9 @@ async def get_robot_log_history(
     title="Подписаться на сделки портфеля",
     description=(
         "Создаёт read-only portfolio_deals.subscribe для конкретного портфеля. "
-        "Возвращает начальный снапшот сделок по отдельным инструментам и subscription_id."
+        "Возвращает начальный снапшот сделок по отдельным инструментам и subscription_id. "
+        "Если aggr=true, price — цена исходной заявки в агрегированной записи, а не "
+        "фактическая цена отдельного исполнения; aggr=false означает обычную сделку."
     ),
     annotations=SUBSCRIPTION_TOOL,
 )
@@ -670,6 +675,8 @@ async def subscribe_portfolio_deals(
     title="Получить новые сделки портфеля",
     description=(
         "Читает накопленные события активной portfolio_deals.subscribe. "
+        "aggr=true помечает агрегированную запись с ценой исходной заявки, а не "
+        "фактическую цену отдельного исполнения; aggr=false — обычную сделку. "
         "После наблюдения обязательно вызови unsubscribe_portfolio_deals."
     ),
     annotations=SUBSCRIPTION_TOOL,
@@ -721,7 +728,9 @@ async def unsubscribe_portfolio_deals(
     title="Получить предыдущие сделки портфеля",
     description=(
         "Вызывает portfolio_deals.get_previous: возвращает до 100 сделок старше даты before. "
-        "security_key позволяет выбрать один инструмент внутри арбитражного портфеля."
+        "security_key позволяет выбрать один инструмент внутри арбитражного портфеля. "
+        "aggr=true означает агрегированную запись: price — цена исходной заявки, "
+        "а не фактическая цена отдельного исполнения; aggr=false — обычная сделка."
     ),
     annotations=READ_ONLY,
 )
@@ -778,7 +787,9 @@ async def get_portfolio_deal_sec_keys(
     description=(
         "Вызывает portfolio_deals.get_history для включительного диапазона дат. "
         "Возвращает сделки с price, orig_price, buy_sell, quantity, sec, curpos и "
-        "другими атрибутами; security_key фильтрует отдельный инструмент."
+        "другими атрибутами; security_key фильтрует отдельный инструмент. "
+        "aggr=true означает агрегированную запись: price — цена исходной заявки, "
+        "а не фактическая цена отдельного исполнения; aggr=false — обычная сделка."
     ),
     annotations=READ_ONLY,
 )
