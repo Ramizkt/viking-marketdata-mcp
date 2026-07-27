@@ -2,7 +2,7 @@
 
 Публичный read-only MCP-сервер поверх WebSocket API `bot.fkviking.com`.
 
-Он предоставляет десять инструментов:
+Он предоставляет 17 инструментов:
 
 - `list_available_portfolios` — доступные пользователю портфели;
 - `subscribe_available_portfolios` — подписка на изменения списка портфелей;
@@ -13,6 +13,13 @@
 - `subscribe_portfolio` — подписка на все изменения выбранного портфеля;
 - `get_portfolio_updates` — чтение обновлений полей портфеля и его инструментов;
 - `unsubscribe_portfolio` — явное завершение подписки на портфель;
+- `subscribe_portfolio_logs` — подписка на новые записи логов портфеля;
+- `get_portfolio_log_updates` — чтение накопленных логов портфеля;
+- `unsubscribe_portfolio_logs` — завершение подписки на логи портфеля;
+- `subscribe_robot_logs` — подписка на новые записи логов робота;
+- `get_robot_log_updates` — чтение накопленных логов робота;
+- `unsubscribe_robot_logs` — завершение подписки на логи робота;
+- `get_robot_log_history` — история логов робота за период;
 - `get_portfolio_data` — история выбранного портфеля за период.
 
 Небольшой результат возвращается непосредственно в MCP. Большой результат
@@ -181,6 +188,47 @@ Viking API: `robot_id`, `portfolio`, `owner`. Ответы также содер
 Проверяются обязательные поля ответа, совпадение `r_id/p_id`, имя портфеля и
 соответствие ключа инструмента его `sec_key`. Ошибки Viking с `r="e"` содержат
 исходные `code`, `msg` и полный API-ответ.
+
+### Логи портфеля и робота
+
+Для новых записей логов используются два независимых lifecycle:
+
+1. `subscribe_portfolio_logs(robot_id, portfolio)` создаёт
+   `portfolio_logs.subscribe`;
+2. `get_portfolio_log_updates(subscription_id, ...)` читает события `r="u"`;
+3. `unsubscribe_portfolio_logs(subscription_id)` отправляет
+   `portfolio_logs.unsubscribe` с `sub_eid`.
+
+И аналогично:
+
+1. `subscribe_robot_logs(robot_id)` создаёт `robot_logs.subscribe`;
+2. `get_robot_log_updates(subscription_id, ...)` читает новые записи;
+3. `unsubscribe_robot_logs(subscription_id)` отправляет
+   `robot_logs.unsubscribe`.
+
+Обе подписки возвращают первоначальный snapshot `r="s"`, `mt`, полный массив
+`values` и удобные алиасы `logs`, `log_count`, `subscription_id`. Дополнительные
+поля записей не фильтруются. Проверяются внешний `r_id/p_id`, идентификаторы
+внутри записей, типы `level`, `msg`, `t`, `dt` и nullable `owner`.
+
+Viking сам ограничивает видимость записей: возвращаются общие логи с пустым
+автором, логи текущего email или все логи, если авторизованной роли это
+разрешено. При удалении портфеля или робота Viking автоматически завершает
+соответствующую подписку. После потери WebSocket-соединения нужно создать новую
+подписку.
+
+`get_robot_log_history` вызывает `robot_logs.get_history` и принимает:
+
+- `robot_id`;
+- `date_from` и `date_to` в ISO 8601 с обязательным часовым поясом;
+- необязательную `message_filter` длиной до 256 символов: `*` означает любое
+  число символов, `.` — один символ;
+- `limit` от 1 до 100000, по умолчанию 100000.
+
+Сервис точно преобразует даты в строки `mint`/`maxt` формата `epoch_nsec`, как
+требует Viking API. Ответ сохраняет все поля логов; `dt` принимается как число
+или строка цифр, поскольку таблица контракта и JSON-пример официальной
+документации используют разные JSON-типы.
 
 ### `get_portfolio_data`
 
