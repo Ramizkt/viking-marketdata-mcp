@@ -24,6 +24,24 @@ class FakeClient:
             },
         ]
 
+    async def get_portfolio_template(self, **kwargs):
+        return {
+            "robot_id": kwargs["robot_id"],
+            "portfolio": kwargs["portfolio"],
+            "template_id": "portfolio_viking_base",
+            "template": {
+                "template_id": "portfolio_viking_base",
+                "template_fields": {
+                    "portfolio": [{"field": "uf0"}],
+                    "security": [{"field": "pos"}],
+                },
+            },
+            "template_fields": {
+                "portfolio": [{"field": "uf0"}],
+                "security": [{"field": "pos"}],
+            },
+        }
+
     async def get_current_portfolio_data(self, **kwargs):
         return {
             "robot_id": kwargs["robot_id"],
@@ -60,6 +78,16 @@ async def test_list_history_only(service):
     result = await service.list_available_portfolios(history_only=True)
     assert result["count"] == 1
     assert result["portfolios"][0]["portfolio"] == "A"
+
+
+async def test_portfolio_template_preserves_all_field_groups(service):
+    result = await service.get_portfolio_template(
+        robot_id="1",
+        portfolio="A",
+    )
+    assert result["template_id"] == "portfolio_viking_base"
+    assert result["template_fields"]["portfolio"][0]["field"] == "uf0"
+    assert result["template_fields"]["security"][0]["field"] == "pos"
 
 
 async def test_current_portfolio_data_preserves_dynamic_fields(service):
