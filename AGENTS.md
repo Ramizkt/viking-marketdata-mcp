@@ -23,7 +23,7 @@ Production MCP:
 - health: `https://viking-marketdata-mcp-production.up.railway.app/health`;
 - setup: `https://viking-marketdata-mcp-production.up.railway.app/setup`.
 
-На момент создания этого файла в `main` реализованы 10 MCP-инструментов. Сервер
+В актуальной версии реализованы 17 MCP-инструментов. Сервер
 только читает данные: он не создаёт и не изменяет портфели, не меняет поля, не
 отправляет торговые сигналы и заявки.
 
@@ -183,7 +183,7 @@ Viking credentials в Railway environment и не возвращайте ста�
 
 ## 6. Реально используемые методы Viking WebSocket API
 
-Сейчас реализовано 10 типов операций Viking:
+Сейчас реализовано 15 типов операций Viking:
 
 | Viking API `type` | Назначение | Где используется |
 |---|---|---|
@@ -195,6 +195,11 @@ Viking credentials в Railway environment и не возвращайте ста�
 | `get_template_by_id` | Полный шаблон по `template_id` | `get_portfolio_template` |
 | `portfolio.subscribe` | Snapshot и обновления текущего состояния портфеля | current/subscribe portfolio |
 | `portfolio.unsubscribe` | Завершение подписки на портфель | current/unsubscribe portfolio |
+| `portfolio_logs.subscribe` | Snapshot и новые записи логов портфеля | subscribe/get portfolio log updates |
+| `portfolio_logs.unsubscribe` | Завершение подписки на логи портфеля | unsubscribe portfolio logs |
+| `robot_logs.subscribe` | Snapshot и новые записи логов робота | subscribe/get robot log updates |
+| `robot_logs.unsubscribe` | Завершение подписки на логи робота | unsubscribe robot logs |
+| `robot_logs.get_history` | История логов робота в диапазоне `epoch_nsec` | `get_robot_log_history` |
 | `portfolio_history.get_history` | Первая порция истории поля в диапазоне | `get_portfolio_data` |
 | `portfolio_history.get_previous` | Пагинация к более ранним точкам | `get_portfolio_data` |
 
@@ -313,6 +318,56 @@ Pydantic-схемой, которая потеряет неизвестные п
 История будет непустой только если для портфеля включена её запись. Поэтому перед
 выгрузкой проверяйте `history_available=true`.
 
+### 7.7. Логи портфеля и робота
+
+Подписка на логи портфеля:
+
+- `subscribe_portfolio_logs(robot_id, portfolio)` отправляет
+  `portfolio_logs.subscribe` с `data={r_id,p_id}` и возвращает snapshot;
+- `get_portfolio_log_updates(subscription_id, wait_seconds=0, max_events=100)`
+  возвращает накопленные updates;
+- `unsubscribe_portfolio_logs(subscription_id)` отправляет
+  `portfolio_logs.unsubscribe` с `data.sub_eid`.
+
+Подписка на логи робота:
+
+- `subscribe_robot_logs(robot_id)` отправляет `robot_logs.subscribe`;
+- `get_robot_log_updates(subscription_id, wait_seconds=0, max_events=100)`
+  возвращает накопленные updates;
+- `unsubscribe_robot_logs(subscription_id)` отправляет
+  `robot_logs.unsubscribe` с `data.sub_eid`.
+
+Обе подписки используют `r="s"` для snapshot и `r="u"` для обновлений.
+Snapshot содержит `mt` в `epoch_nsec`; внешние `r_id` и `p_id` проверяются
+против параметров подписки. Записи сохраняются без фильтрации дополнительных
+полей. Обязательны `level`, `msg`, `t`, `dt`; `owner` может быть строкой, пустой
+строкой или `null`. Поля `id`, `r_id` и `name` проверяются, когда присутствуют:
+официальные таблицы называют некоторые из них обязательными, но JSON-примеры
+updates их не содержат.
+
+В официальной таблице запроса `portfolio_logs.subscribe` пропущен `p_id`, хотя
+он есть в request example и обязателен во всех snapshot/update response.
+Реализация отправляет оба идентификатора: `r_id` и `p_id`.
+
+`get_robot_log_history(robot_id, date_from, date_to, message_filter=None,
+limit=100000)`:
+
+- вызывает `robot_logs.get_history`;
+- требует ISO 8601 даты с часовым поясом и `date_from < date_to`;
+- преобразует границы точно, без float, в строки `mint`/`maxt` `epoch_nsec`;
+- принимает `message_filter` длиной до 256 символов, где `*` — любое число
+  символов, `.` — один символ;
+- принимает `limit` от 1 до 100000;
+- требует совпадение `r_id` каждой записи с запрошенным роботом;
+- сохраняет дополнительные поля без фильтрации;
+- принимает `dt` как integer или digit string, потому что таблица и официальный
+  JSON-пример расходятся по JSON-типу.
+
+Viking фильтрует видимые логи по автору записи и авторизованным email/role.
+При удалении портфеля или робота сервер Viking автоматически отписывает клиента.
+Локальный буфер ограничен 1000 сообщениями; overflow означает потерю данных и
+требует новой подписки. После disconnect подписки не восстанавливаются молча.
+
 ## 8. Как ИИ должен пользоваться MCP
 
 Безопасная последовательность:
@@ -323,7 +378,11 @@ Pydantic-схемой, которая потеряет неизвестные п
 4. Для одного текущего snapshot вызвать `get_current_portfolio_data`.
 5. Для длительного наблюдения вызвать `subscribe_*`, периодически читать
    `get_*_updates` и обязательно вызвать соответствующий `unsubscribe_*`.
-6. Для истории проверить `history_available`, использовать даты с часовым поясом
+6. Для логов выбрать уровень: portfolio logs для одного портфеля, robot logs для
+   всего робота; по окончании обязательно отписаться.
+7. Для истории логов робота использовать `get_robot_log_history` и при
+   необходимости маску `message_filter`.
+8. Для истории портфеля проверить `history_available`, использовать даты с часовым поясом
    и по умолчанию `delivery=auto`.
 
 Примеры корректных неоднотипных запросов:
@@ -332,6 +391,8 @@ Pydantic-схемой, которая потеряет неизвестные п
 - «Получи шаблон портфеля `demo` робота `1` и объясни поля `uf1` и `uf2`».
 - «Сопоставь текущий snapshot портфеля с описанием полей его шаблона».
 - «Следи за изменениями `pos` и `fin_res`, затем корректно заверши подписку».
+- «Следи за новыми ошибками в логах портфеля и затем корректно отпишись».
+- «Покажи историю логов робота за час, оставив сообщения по маске `*error*`».
 - «Выгрузи `buy`, `sell`, `pos` за сутки с агрегацией `5m`».
 - «Проверь, появился ли новый доступный портфель».
 
@@ -443,12 +504,12 @@ Production развёрнут в Railway из Dockerfile:
 - проверку повторной авторизации Codex и Claude Code;
 - актуализацию README и `AGENTS.md` при каждом изменении возможностей.
 
-## 12. История развития: исходный MVP + 9 merged PR
+## 12. История развития: исходный MVP + 10 merged PR
 
 Исходный MVP создал read-only сервер, список портфелей, историческую выгрузку,
 CSV delivery, тесты, Docker/Railway.
 
-Далее выполнено восемь этапов:
+Далее выполнено десять этапов:
 
 1. PR #1 — персональные credentials вместо общих серверных credentials.
 2. PR #2 — два локальных onboarding-режима; позднее заменены OAuth flow.
@@ -463,6 +524,12 @@ CSV delivery, тесты, Docker/Railway.
    `get_portfolio_template`.
 9. PR #9 — корневой `AGENTS.md` с постоянным контекстом проекта и обязательным
    процессом разработки.
+10. PR #10 — PR template и обязательная проверка `AGENTS.md consistency`.
+
+Следующее расширение добавляет `portfolio_logs.subscribe/unsubscribe`,
+`robot_logs.subscribe/unsubscribe/get_history` и семь MCP-инструментов полного
+lifecycle логов. До merge соответствующего PR production эти возможности не
+получает.
 
 История полезна для понимания решений, но устаревшие механизмы PR #1/#2 нельзя
 возвращать без отдельного архитектурного решения.
