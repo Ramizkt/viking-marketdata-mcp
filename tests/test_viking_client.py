@@ -1116,3 +1116,128 @@ async def test_get_robot_log_history_rejects_invalid_bounds_and_filter():
             maxt_ns="2",
             message_filter="x" * 257,
         )
+
+
+def _deal(**overrides):
+    row = {
+        "id": "deal-1",
+        "ono": 0,
+        "price": 101.25,
+        "orig_price": 101.5,
+        "buy_sell": 1,
+        "quantity": 2,
+        "cn": "virtual",
+        "sec": "BTC",
+        "decimals": 2,
+        "dt": "1676360033000144435",
+        "curpos": 2,
+        "lot_size": 1,
+    }
+    row.update(overrides)
+    return row
+
+
+async def test_subscribe_portfolio_deals_uses_documented_payload_and_preserves_fields():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {}
+    client.close = AsyncMock()
+    client._subscribe = AsyncMock(return_value={
+        "type": "portfolio_deals.subscribe",
+        "eid": "deals-sub-1",
+        "ts": 1,
+        "r": "s",
+        "data": {
+            "mt": "1676360033000144435",
+            "r_id": "1",
+            "p_id": "arb",
+            "values": [_deal(custom={"kept": True})],
+        },
+    })
+
+    result = await client.subscribe_portfolio_deals(robot_id="1", portfolio="arb")
+
+    client._subscribe.assert_awaited_once_with(
+        "portfolio_deals.subscribe", {"r_id": "1", "p_id": "arb"}
+    )
+    assert result["deal_count"] == 1
+    assert result["deals"][0]["custom"] == {"kept": True}
+
+
+async def test_portfolio_deals_history_sends_string_bounds_and_security_filter():
+    client = object.__new__(VikingClient)
+    client.request = AsyncMock(return_value={
+        "type": "portfolio_deals.get_history",
+        "eid": "request-1",
+        "ts": 2,
+        "r": "p",
+        "data": {"values": [_deal(r_id="1", name="arb")]},
+    })
+
+    result = await client.get_portfolio_deal_history(
+        robot_id="1",
+        portfolio="arb",
+        mint_ns="1",
+        maxt_ns="2000000000000000000",
+        security_key="BTC",
+        limit=10,
+    )
+
+    client.request.assert_awaited_once_with(
+        "portfolio_deals.get_history",
+        {
+            "r_id": "1",
+            "p_id": "arb",
+            "mint": "1",
+            "maxt": "2000000000000000000",
+            "lim": 10,
+            "sec_key": "BTC",
+        },
+    )
+    assert result["deal_count"] == 1
+
+
+async def test_previous_portfolio_deals_enforces_documented_limit():
+    client = object.__new__(VikingClient)
+    with pytest.raises(ValueError, match="1..100"):
+        await client.get_previous_portfolio_deals(
+            robot_id="1", portfolio="arb", before_ns="2", limit=101
+        )
+
+
+async def test_get_portfolio_deal_sec_keys_parses_unique_instruments():
+    client = object.__new__(VikingClient)
+    client.request = AsyncMock(return_value={
+        "type": "portfolio_deals.get_sec_keys",
+        "eid": "request-2",
+        "ts": 3,
+        "r": "p",
+        "data": {"values": ["BTC", "ETH"]},
+    })
+
+    result = await client.get_portfolio_deal_sec_keys(
+        robot_id="1", portfolio="arb"
+    )
+
+    assert result["security_keys"] == ["BTC", "ETH"]
+    assert result["security_count"] == 2
+
+
+async def test_portfolio_deals_unsubscribe_uses_subscription_eid():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {
+        "deals-sub-1": _Subscription("portfolio_deals.subscribe", asyncio.Queue())
+    }
+    client.request = AsyncMock(return_value={
+        "type": "portfolio_deals.unsubscribe",
+        "eid": "request-3",
+        "ts": 4,
+        "r": "p",
+        "data": {},
+    })
+
+    result = await client.unsubscribe_portfolio_deals("deals-sub-1")
+
+    client.request.assert_awaited_once_with(
+        "portfolio_deals.unsubscribe", {"sub_eid": "deals-sub-1"}
+    )
+    assert result["unsubscribed"] is True
