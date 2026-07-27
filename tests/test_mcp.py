@@ -12,6 +12,7 @@ async def test_mcp_lists_expected_tools():
         "subscribe_available_portfolios",
         "get_available_portfolio_updates",
         "unsubscribe_available_portfolios",
+        "get_portfolio_template",
         "get_current_portfolio_data",
         "subscribe_portfolio",
         "get_portfolio_updates",
@@ -87,3 +88,42 @@ async def test_mcp_current_portfolio_data_returns_all_fields(monkeypatch):
     assert result.structuredContent["value"]["dynamic_field"] == {"nested": True}
     security = result.structuredContent["value"]["securities"]["BTCUSDT"]
     assert security["custom_security_field"] == 123
+
+
+async def test_mcp_portfolio_template_returns_complete_schema(monkeypatch):
+    class FakeService:
+        async def get_portfolio_template(self, *, robot_id: str, portfolio: str):
+            return {
+                "robot_id": robot_id,
+                "portfolio": portfolio,
+                "template_id": "portfolio_viking_base",
+                "template": {
+                    "template_id": "portfolio_viking_base",
+                    "template_fields": {
+                        "portfolio": [{"field": "uf0"}],
+                        "security": [{"field": "pos"}],
+                        "custom_group": [{"field": "custom"}],
+                    },
+                },
+                "template_fields": {
+                    "portfolio": [{"field": "uf0"}],
+                    "security": [{"field": "pos"}],
+                    "custom_group": [{"field": "custom"}],
+                },
+            }
+
+    monkeypatch.setattr(main, "_service_for_request", lambda: FakeService())
+
+    async with create_connected_server_and_client_session(
+        main.mcp, raise_exceptions=True
+    ) as session:
+        result = await session.call_tool(
+            "get_portfolio_template",
+            {"robot_id": "1", "portfolio": "demo"},
+        )
+
+    assert result.isError is False
+    assert result.structuredContent["template_id"] == "portfolio_viking_base"
+    assert result.structuredContent["template_fields"]["custom_group"] == [
+        {"field": "custom"}
+    ]
