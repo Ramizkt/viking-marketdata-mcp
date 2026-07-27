@@ -49,7 +49,8 @@ https://viking-marketdata-mcp-production.up.railway.app/mcp
 
    - **Только на эту сессию** — Viking credentials находятся только в RAM
      Railway. Они удаляются после 15 минут без запросов, завершения сессии или
-     перезапуска сервера.
+     перезапуска сервера. Следующий запрос после завершения сессии автоматически
+     запустит повторную авторизацию.
    - **Запомнить на этом компьютере** — Codex хранит локальный OAuth-токен.
      Viking credentials зашифрованы внутри токена; Railway не сохраняет их в
      базе данных или файлах.
@@ -181,6 +182,7 @@ CREDENTIALS_IDLE_TTL_SECONDS=900
 OAUTH_SESSION_IDLE_TTL_SECONDS=900
 OAUTH_SESSION_MAX_TTL_SECONDS=28800
 OAUTH_PERSISTENT_TOKEN_TTL_SECONDS=2592000
+OAUTH_CLIENT_STORE_PATH=/data/oauth-clients.json
 EXPORT_DIR=/data/exports
 INLINE_MAX_ROWS=500
 INLINE_MAX_BYTES=200000
@@ -192,6 +194,9 @@ EXPORT_SIGNING_KEY=случайный внутренний секрет
 `RAILWAY_PUBLIC_DOMAIN` Railway задаёт автоматически. `EXPORT_SIGNING_KEY`
 подписывает CSV-ссылки и по умолчанию служит ключом для зашифрованных OAuth-токенов.
 Для независимой ротации можно задать отдельный `CREDENTIAL_TOKEN_KEY`.
+`OAUTH_CLIENT_STORE_PATH` содержит только технические регистрации MCP-клиентов
+(`client_id`, redirect URI и client secret), но не Viking credentials. Этот файл
+нужен, чтобы Codex и Claude Code могли повторно авторизоваться после рестарта Railway.
 
 ## Безопасность
 
@@ -200,6 +205,8 @@ EXPORT_SIGNING_KEY=случайный внутренний секрет
 - каждый пользователь авторизуется своими Viking credentials;
 - у Railway нет постоянной базы пользовательских credentials;
 - session credentials существуют только в RAM;
+- технические регистрации OAuth-клиентов сохраняются на Railway Volume, чтобы
+  повторный вход работал после перезапуска сервера;
 - local credentials находятся в зашифрованном токене, который хранит MCP-клиент;
 - CSV-ссылки подписаны, ограничены по времени и не содержат API key;
 - сервер предоставляет только read-only инструменты.
