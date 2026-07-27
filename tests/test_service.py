@@ -24,6 +24,18 @@ class FakeClient:
             },
         ]
 
+    async def get_current_portfolio_data(self, **kwargs):
+        return {
+            "robot_id": kwargs["robot_id"],
+            "portfolio": kwargs["portfolio"],
+            "value": {
+                "name": kwargs["portfolio"],
+                "custom_field": 42,
+                "securities": {},
+            },
+            "unsubscribed": True,
+        }
+
     async def get_portfolio_history(self, **kwargs):
         data = {
             "buy": [{"dt": 1000, "v": 10}, {"dt": 3000, "v": 12}],
@@ -48,6 +60,15 @@ async def test_list_history_only(service):
     result = await service.list_available_portfolios(history_only=True)
     assert result["count"] == 1
     assert result["portfolios"][0]["portfolio"] == "A"
+
+
+async def test_current_portfolio_data_preserves_dynamic_fields(service):
+    result = await service.get_current_portfolio_data(
+        robot_id="1",
+        portfolio="A",
+    )
+    assert result["value"]["custom_field"] == 42
+    assert result["unsubscribed"] is True
 
 
 def test_merge_fields_forward_fills():
