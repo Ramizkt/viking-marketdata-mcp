@@ -65,6 +65,44 @@ class MarketDataService:
     async def unsubscribe_available_portfolios(self, *, subscription_id: str) -> dict[str, Any]:
         return await self.client.unsubscribe_available_portfolios(subscription_id)
 
+    async def get_current_portfolio_data(
+        self,
+        *,
+        robot_id: str,
+        portfolio: str,
+    ) -> dict[str, Any]:
+        return await self.client.get_current_portfolio_data(
+            robot_id=robot_id,
+            portfolio=portfolio,
+        )
+
+    async def subscribe_portfolio(
+        self,
+        *,
+        robot_id: str,
+        portfolio: str,
+    ) -> dict[str, Any]:
+        return await self.client.subscribe_portfolio(
+            robot_id=robot_id,
+            portfolio=portfolio,
+        )
+
+    async def get_portfolio_updates(
+        self,
+        *,
+        subscription_id: str,
+        wait_seconds: float,
+        max_events: int,
+    ) -> dict[str, Any]:
+        return await self.client.get_portfolio_updates(
+            subscription_id,
+            wait_seconds=wait_seconds,
+            max_events=max_events,
+        )
+
+    async def unsubscribe_portfolio(self, *, subscription_id: str) -> dict[str, Any]:
+        return await self.client.unsubscribe_portfolio(subscription_id)
+
     async def get_portfolio_data(
         self,
         *,
