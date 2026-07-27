@@ -51,6 +51,10 @@ mcp = FastMCP(
         "и обязательно заверши подписку через unsubscribe_available_portfolios. "
         "Для изменений полей одного портфеля используй subscribe_portfolio, "
         "get_portfolio_updates и unsubscribe_portfolio. "
+        "Для новых логов портфеля используй subscribe_portfolio_logs, "
+        "get_portfolio_log_updates и unsubscribe_portfolio_logs. Для логов робота используй "
+        "subscribe_robot_logs, get_robot_log_updates и unsubscribe_robot_logs; историю логов "
+        "получай через get_robot_log_history. "
         "Если пользователь не назвал поля, используй buy, sell и pos. Сервер только читает данные. "
         "Credentials не входят в аргументы MCP-инструментов."
     ),
@@ -393,6 +397,239 @@ async def unsubscribe_portfolio(
         return _error_result(exc)
     return CallToolResult(
         content=[TextContent(type="text", text="Подписка на портфель успешно закрыта.")],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Подписаться на логи портфеля",
+    description=(
+        "Создаёт read-only подписку Viking portfolio_logs.subscribe по robot_id и portfolio. "
+        "Возвращает первоначальный снапшот логов и subscription_id. Логи фильтруются Viking "
+        "по автору и роли. Сохрани subscription_id для чтения обновлений и явной отписки."
+    ),
+    annotations=SUBSCRIPTION_TOOL,
+)
+async def subscribe_portfolio_logs(
+    robot_id: Annotated[str, Field(min_length=1, description="Идентификатор робота")],
+    portfolio: Annotated[str, Field(min_length=1, description="Имя портфеля")],
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().subscribe_portfolio_logs(
+            robot_id=robot_id,
+            portfolio=portfolio,
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Portfolio logs subscription failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=(
+                    f"Подписка на логи {robot_id}/{portfolio} создана. "
+                    f"Получено записей: {result['log_count']}."
+                ),
+            )
+        ],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Получить новые логи портфеля",
+    description=(
+        "Возвращает накопленные события активной portfolio_logs.subscribe без потери "
+        "дополнительных полей записей. wait_seconds=0 проверяет сразу, максимум ожидания — "
+        "30 секунд. После завершения наблюдения вызови unsubscribe_portfolio_logs."
+    ),
+    annotations=SUBSCRIPTION_TOOL,
+)
+async def get_portfolio_log_updates(
+    subscription_id: Annotated[str, Field(min_length=1)],
+    wait_seconds: Annotated[float, Field(ge=0, le=30)] = 0,
+    max_events: Annotated[int, Field(ge=1, le=500)] = 100,
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().get_portfolio_log_updates(
+            subscription_id=subscription_id,
+            wait_seconds=wait_seconds,
+            max_events=max_events,
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Reading portfolio log updates failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=(
+                    f"Получено событий логов портфеля: {result['event_count']}. "
+                    f"Подписка активна: {result['active']}."
+                ),
+            )
+        ],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Отписаться от логов портфеля",
+    description=(
+        "Вызывает Viking portfolio_logs.unsubscribe с sub_eid активной подписки "
+        "и возвращает полный ответ API."
+    ),
+    annotations=SUBSCRIPTION_TOOL,
+)
+async def unsubscribe_portfolio_logs(
+    subscription_id: Annotated[str, Field(min_length=1)],
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().unsubscribe_portfolio_logs(
+            subscription_id=subscription_id
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Portfolio logs unsubscribe failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[TextContent(type="text", text="Подписка на логи портфеля закрыта.")],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Подписаться на логи робота",
+    description=(
+        "Создаёт read-only подписку Viking robot_logs.subscribe по robot_id. Возвращает "
+        "первоначальный снапшот логов и subscription_id. Логи фильтруются Viking по автору "
+        "и роли. Сохрани subscription_id для чтения обновлений и явной отписки."
+    ),
+    annotations=SUBSCRIPTION_TOOL,
+)
+async def subscribe_robot_logs(
+    robot_id: Annotated[str, Field(min_length=1, description="Идентификатор робота")],
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().subscribe_robot_logs(robot_id=robot_id)
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Robot logs subscription failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=(
+                    f"Подписка на логи робота {robot_id} создана. "
+                    f"Получено записей: {result['log_count']}."
+                ),
+            )
+        ],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Получить новые логи робота",
+    description=(
+        "Возвращает накопленные события активной robot_logs.subscribe без потери "
+        "дополнительных полей записей. wait_seconds=0 проверяет сразу, максимум ожидания — "
+        "30 секунд. После завершения наблюдения вызови unsubscribe_robot_logs."
+    ),
+    annotations=SUBSCRIPTION_TOOL,
+)
+async def get_robot_log_updates(
+    subscription_id: Annotated[str, Field(min_length=1)],
+    wait_seconds: Annotated[float, Field(ge=0, le=30)] = 0,
+    max_events: Annotated[int, Field(ge=1, le=500)] = 100,
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().get_robot_log_updates(
+            subscription_id=subscription_id,
+            wait_seconds=wait_seconds,
+            max_events=max_events,
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Reading robot log updates failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=(
+                    f"Получено событий логов робота: {result['event_count']}. "
+                    f"Подписка активна: {result['active']}."
+                ),
+            )
+        ],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Отписаться от логов робота",
+    description=(
+        "Вызывает Viking robot_logs.unsubscribe с sub_eid активной подписки "
+        "и возвращает полный ответ API."
+    ),
+    annotations=SUBSCRIPTION_TOOL,
+)
+async def unsubscribe_robot_logs(
+    subscription_id: Annotated[str, Field(min_length=1)],
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().unsubscribe_robot_logs(
+            subscription_id=subscription_id
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Robot logs unsubscribe failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[TextContent(type="text", text="Подписка на логи робота закрыта.")],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="История логов робота",
+    description=(
+        "Вызывает Viking robot_logs.get_history. date_from/date_to должны быть ISO 8601 "
+        "с часовым поясом и преобразуются в строки epoch_nsec. message_filter поддерживает "
+        "* для любого числа символов и . для одного символа; максимум 256 знаков. "
+        "limit допустим от 1 до 100000."
+    ),
+    annotations=READ_ONLY,
+)
+async def get_robot_log_history(
+    robot_id: Annotated[str, Field(min_length=1, description="Идентификатор робота")],
+    date_from: Annotated[datetime, Field(description="Начало периода с часовым поясом")],
+    date_to: Annotated[datetime, Field(description="Конец периода с часовым поясом")],
+    message_filter: Annotated[
+        str | None,
+        Field(
+            max_length=256,
+            description="Маска msg: * — любое число символов, . — один символ",
+        ),
+    ] = None,
+    limit: Annotated[int, Field(ge=1, le=100_000)] = 100_000,
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().get_robot_log_history(
+            robot_id=robot_id,
+            date_from=date_from,
+            date_to=date_to,
+            message_filter=message_filter,
+            limit=limit,
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Robot log history request failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=f"Получено записей истории логов робота: {result['log_count']}.",
+            )
+        ],
         structuredContent=result,
     )
 
