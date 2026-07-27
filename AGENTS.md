@@ -183,7 +183,7 @@ Viking credentials в Railway environment и не возвращайте ста�
 
 ## 6. Реально используемые методы Viking WebSocket API
 
-Сейчас реализовано 15 типов операций Viking:
+Сейчас реализовано 20 типов операций Viking:
 
 | Viking API `type` | Назначение | Где используется |
 |---|---|---|
@@ -200,6 +200,11 @@ Viking credentials в Railway environment и не возвращайте ста�
 | `robot_logs.subscribe` | Snapshot и новые записи логов робота | subscribe/get robot log updates |
 | `robot_logs.unsubscribe` | Завершение подписки на логи робота | unsubscribe robot logs |
 | `robot_logs.get_history` | История логов робота в диапазоне `epoch_nsec` | `get_robot_log_history` |
+| `portfolio_deals.subscribe` | Snapshot и новые сделки портфеля по инструментам | subscribe/get portfolio deal updates |
+| `portfolio_deals.unsubscribe` | Завершение подписки на сделки | unsubscribe portfolio deals |
+| `portfolio_deals.get_previous` | До 100 сделок старше `mt` | `get_previous_portfolio_deals` |
+| `portfolio_deals.get_sec_keys` | Уникальные инструменты в истории сделок | `get_portfolio_deal_sec_keys` |
+| `portfolio_deals.get_history` | Сделки во включительном диапазоне `epoch_nsec` | `get_portfolio_deal_history` |
 | `portfolio_history.get_history` | Первая порция истории поля в диапазоне | `get_portfolio_data` |
 | `portfolio_history.get_previous` | Пагинация к более ранним точкам | `get_portfolio_data` |
 
@@ -368,6 +373,26 @@ Viking фильтрует видимые логи по автору записи
 Локальный буфер ограничен 1000 сообщениями; overflow означает потерю данных и
 требует новой подписки. После disconnect подписки не восстанавливаются молча.
 
+### 7.8. Сделки портфеля по инструментам
+
+- `subscribe_portfolio_deals(robot_id, portfolio)` отправляет
+  `portfolio_deals.subscribe` с `r_id+p_id` и возвращает snapshot;
+- `get_portfolio_deal_updates(...)` читает `r="u"` из контролируемого буфера;
+- `unsubscribe_portfolio_deals(subscription_id)` передаёт исходный eid как
+  `data.sub_eid`;
+- `get_previous_portfolio_deals(..., before, security_key=None, limit=100)`
+  преобразует `before` в строку `epoch_nsec`; допустимый limit — `1..100`;
+- `get_portfolio_deal_sec_keys(...)` возвращает уникальные `sec_key`;
+- `get_portfolio_deal_history(..., date_from, date_to, security_key=None,
+  limit=100000)` передаёт включительные `mint/maxt` строками `epoch_nsec`.
+
+Каждая сделка сохраняет атрибуты `id`, `ono`, `price`, `orig_price`,
+`buy_sell`, `quantity`, `cn`, `sec`, `decimals`, `dt`, `curpos`, `lot_size`
+и любые неизвестные поля. `r_id`/`name` проверяются, если они присутствуют:
+update в официальной документации их не содержит. Поле `ono` принимается строкой
+или integer: таблица описывает string, а официальный snapshot example содержит
+number. Фильтр `security_key` передаётся в Viking как `sec_key`.
+
 ## 8. Как ИИ должен пользоваться MCP
 
 Безопасная последовательность:
@@ -382,7 +407,10 @@ Viking фильтрует видимые логи по автору записи
    всего робота; по окончании обязательно отписаться.
 7. Для истории логов робота использовать `get_robot_log_history` и при
    необходимости маску `message_filter`.
-8. Для истории портфеля проверить `history_available`, использовать даты с часовым поясом
+8. Для сделок арбитражного портфеля сначала при необходимости получить список
+   инструментов через `get_portfolio_deal_sec_keys`, затем запрашивать историю
+   с `security_key` или без него.
+9. Для истории портфеля проверить `history_available`, использовать даты с часовым поясом
    и по умолчанию `delivery=auto`.
 
 Примеры корректных неоднотипных запросов:
@@ -530,6 +558,10 @@ CSV delivery, тесты, Docker/Railway.
 `robot_logs.subscribe/unsubscribe/get_history` и семь MCP-инструментов полного
 lifecycle логов. До merge соответствующего PR production эти возможности не
 получает.
+
+Расширение после логов добавляет пять операций `portfolio_deals.*` и шесть
+MCP-инструментов для snapshot/update lifecycle, пагинации к прошлому, списка
+инструментов и истории сделок за период.
 
 История полезна для понимания решений, но устаревшие механизмы PR #1/#2 нельзя
 возвращать без отдельного архитектурного решения.
