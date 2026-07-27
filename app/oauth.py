@@ -6,11 +6,13 @@ import hashlib
 import html
 import json
 import logging
+import os
 import secrets
 import time
 from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import urlparse
+from uuid import UUID
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -25,7 +27,8 @@ from mcp.server.auth.provider import (
     TokenError,
     construct_redirect_uri,
 )
-from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+from mcp.shared.auth import InvalidRedirectUriError, OAuthClientInformationFull, OAuthToken
+from pydantic import AnyUrl
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse
 
@@ -50,6 +53,7 @@ class PendingAuthorization:
     client_id: str
     params: AuthorizationParams
     expires_at: float
+    recovered_client: OAuthClientInformationFull | None = None
 
 
 @dataclass
@@ -57,6 +61,21 @@ class SessionToken:
     access: AccessToken
     credentials: VikingCredentials
     last_used: float
+
+
+class RecoverableOAuthClient(OAuthClientInformationFull):
+    """Temporary public client used to migrate registrations lost before persistence."""
+
+    def validate_redirect_uri(self, redirect_uri: AnyUrl | None) -> AnyUrl:
+        if redirect_uri is None:
+            raise InvalidRedirectUriError("redirect_uri is required while recovering an OAuth client")
+        parsed = urlparse(str(redirect_uri))
+        is_loopback = parsed.hostname in {"127.0.0.1", "::1", "localhost"}
+        if parsed.scheme != "https" and not (parsed.scheme == "http" and is_loopback):
+            raise InvalidRedirectUriError(
+                "Recovered OAuth clients must use HTTPS or a loopback HTTP redirect URI"
+            )
+        return redirect_uri
 
 
 class VikingOAuthProvider(
@@ -71,7 +90,9 @@ class VikingOAuthProvider(
     def __init__(self, settings: Settings):
         self.settings = settings
         self.base_url = settings.resolved_public_base_url
-        self._clients: dict[str, OAuthClientInformationFull] = {}
+        self._client_store_path = settings.resolved_oauth_client_store_path
+        self._clients = self._load_clients()
+        self._clients_lock = asyncio.Lock()
         self._pending: dict[str, PendingAuthorization] = {}
         self._codes: dict[str, VikingAuthorizationCode] = {}
         self._session_tokens: dict[str, SessionToken] = {}
@@ -99,10 +120,22 @@ class VikingOAuthProvider(
         self._pending.clear()
         self._codes.clear()
         self._session_tokens.clear()
-        self._clients.clear()
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
-        return self._clients.get(client_id)
+        client = self._clients.get(client_id)
+        if client is not None:
+            return client
+        if not self._is_legacy_client_id(client_id):
+            return None
+        return RecoverableOAuthClient(
+            client_id=client_id,
+            client_secret=None,
+            redirect_uris=[AnyUrl("http://127.0.0.1")],
+            token_endpoint_auth_method="none",
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+            scope=OAUTH_SCOPE,
+        )
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         if not client_info.client_id:
@@ -115,7 +148,7 @@ class VikingOAuthProvider(
                     "invalid_redirect_uri",
                     "Redirect URI must use HTTPS or a loopback HTTP address",
                 )
-        self._clients[client_info.client_id] = client_info
+        await self._persist_client(client_info)
 
     async def authorize(
         self,
@@ -124,11 +157,25 @@ class VikingOAuthProvider(
     ) -> str:
         if not client.client_id:
             raise AuthorizeError("invalid_request", "client_id is required")
+        recovered_client = None
+        if isinstance(client, RecoverableOAuthClient):
+            recovered_client = OAuthClientInformationFull(
+                client_id=client.client_id,
+                client_secret=None,
+                client_id_issued_at=int(time.time()),
+                redirect_uris=[params.redirect_uri],
+                token_endpoint_auth_method="none",
+                grant_types=["authorization_code", "refresh_token"],
+                response_types=["code"],
+                scope=" ".join(params.scopes or [OAUTH_SCOPE]),
+                client_name="Recovered MCP client",
+            )
         pending_id = secrets.token_urlsafe(32)
         self._pending[pending_id] = PendingAuthorization(
             client_id=client.client_id,
             params=params,
             expires_at=time.time() + 600,
+            recovered_client=recovered_client,
         )
         return f"{self.base_url}/oauth/connect/{pending_id}"
 
@@ -308,6 +355,19 @@ class VikingOAuthProvider(
         finally:
             await client.close()
 
+        if pending.recovered_client is not None:
+            try:
+                await self._persist_client(pending.recovered_client)
+            except OSError:
+                logger.exception("Could not persist recovered OAuth client")
+                return self._render_page(
+                    pending_id,
+                    selected_mode=mode,
+                    email=email,
+                    role=role,
+                    error="Не удалось восстановить OAuth-сессию. Повторите попытку позже.",
+                )
+
         self._pending.pop(pending_id, None)
         code_value = secrets.token_urlsafe(32)
         params = pending.params
@@ -347,6 +407,71 @@ class VikingOAuthProvider(
                 }
         except asyncio.CancelledError:
             raise
+
+    async def _persist_client(self, client_info: OAuthClientInformationFull) -> None:
+        if not client_info.client_id:
+            raise ValueError("OAuth client_id is required")
+        async with self._clients_lock:
+            clients = {**self._clients, client_info.client_id: client_info}
+            await asyncio.to_thread(self._write_clients, clients)
+            self._clients = clients
+
+    def _load_clients(self) -> dict[str, OAuthClientInformationFull]:
+        if not self._client_store_path.exists():
+            return {}
+        try:
+            payload = json.loads(self._client_store_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or payload.get("version") != 1:
+                raise ValueError("unsupported OAuth client store format")
+            raw_clients = payload.get("clients")
+            if not isinstance(raw_clients, list):
+                raise ValueError("OAuth client store must contain a client list")
+
+            clients: dict[str, OAuthClientInformationFull] = {}
+            for raw_client in raw_clients:
+                client = OAuthClientInformationFull.model_validate(raw_client)
+                if not client.client_id:
+                    raise ValueError("stored OAuth client has no client_id")
+                clients[client.client_id] = client
+            return clients
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            logger.exception("Ignoring invalid OAuth client store at %s", self._client_store_path)
+            return {}
+
+    def _write_clients(self, clients: dict[str, OAuthClientInformationFull]) -> None:
+        self._client_store_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 1,
+            "clients": [
+                client.model_dump(mode="json", exclude_none=True)
+                for client in clients.values()
+            ],
+        }
+        temporary_path = self._client_store_path.with_name(
+            f".{self._client_store_path.name}.{secrets.token_hex(8)}.tmp"
+        )
+        try:
+            descriptor = os.open(
+                temporary_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump(payload, stream, ensure_ascii=False, separators=(",", ":"))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_path, self._client_store_path)
+            os.chmod(self._client_store_path, 0o600)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _is_legacy_client_id(client_id: str) -> bool:
+        try:
+            parsed = UUID(client_id)
+        except (ValueError, AttributeError):
+            return False
+        return parsed.version == 4 and str(parsed) == client_id
 
     def _encrypt_token(
         self,
