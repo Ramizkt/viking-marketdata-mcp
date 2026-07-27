@@ -105,7 +105,9 @@ API. История фактически запрашивается через
 - `tests/test_mcp.py` — внешний MCP-контракт;
 - `tests/test_oauth.py` — авторизация и повторный вход;
 - `tests/test_export_store.py` — CSV и подписанные ссылки;
-- `.env.example`, `Dockerfile`, `railway.json`, `README.md` — запуск и deploy.
+- `.env.example`, `Dockerfile`, `railway.json`, `README.md` — запуск и deploy;
+- `.github/pull_request_template.md` — обязательный checklist каждого PR;
+- `.github/workflows/agents-context.yml` — проверка синхронизации кода и `AGENTS.md`.
 
 Архитектурный путь вызова:
 
@@ -356,9 +358,9 @@ Pydantic-схемой, которая потеряет неизвестные п
    необходимости OAuth/export regression; обновить `README.md` и этот файл;
    выполнить `uv run ruff check .` и `uv run pytest -q`.
 8. **Публикация** — создать ветку `agent/<short-description>`, закоммитить только
-   относящиеся к задаче файлы, открыть draft PR с описанием API-контракта и
-   проверок. Не сливать PR и не считать Railway обновлённым без явной команды
-   пользователя.
+   относящиеся к задаче файлы, заполнить `.github/pull_request_template.md` и
+   открыть draft PR с описанием API-контракта и проверок. Не сливать PR и не
+   считать Railway обновлённым без явной команды пользователя.
 
 После явной команды на production:
 
@@ -369,8 +371,19 @@ Pydantic-схемой, которая потеряет неизвестные п
 5. отдельно проверить `tools/list` или целевой MCP-вызов — merge в `main` сам по
    себе не доказывает, что runtime уже пересобран.
 
-В репозитории сейчас нет GitHub Actions workflow. Нельзя писать, что CI прошёл,
-если выполнялись только локальные команды.
+В репозитории есть один процессный GitHub Actions workflow:
+`.github/workflows/agents-context.yml`. Он запускается для pull request и требует
+изменить `AGENTS.md` в том же PR, если затронуты `app/`, `.github/`, `Dockerfile`,
+`railway.json`, `pyproject.toml`, `uv.lock` или `.env.example`.
+
+Проверка подтверждает только наличие изменения `AGENTS.md`, но не его качество.
+Обновляйте содержание по существу: новые методы, инструменты, аргументы, ошибки,
+архитектурные решения, авторизацию, эксплуатацию и ограничения. Формальное
+изменение пробела или даты не считается корректной актуализацией контекста.
+
+Этот workflow не запускает Ruff или pytest и не является полным CI. Нельзя
+писать, что тесты или CI прошли, если выполнялась только проверка
+`AGENTS.md consistency` или только локальные команды.
 
 ## 10. Тестирование и правила кода
 
@@ -430,7 +443,7 @@ Production развёрнут в Railway из Dockerfile:
 - проверку повторной авторизации Codex и Claude Code;
 - актуализацию README и `AGENTS.md` при каждом изменении возможностей.
 
-## 12. История развития: исходный MVP + 8 merged PR
+## 12. История развития: исходный MVP + 9 merged PR
 
 Исходный MVP создал read-only сервер, список портфелей, историческую выгрузку,
 CSV delivery, тесты, Docker/Railway.
@@ -448,6 +461,8 @@ CSV delivery, тесты, Docker/Railway.
 7. PR #7 — snapshot и подписка на полное текущее состояние портфеля.
 8. PR #8 — цепочка `get_template_id -> get_template_by_id` и
    `get_portfolio_template`.
+9. PR #9 — корневой `AGENTS.md` с постоянным контекстом проекта и обязательным
+   процессом разработки.
 
 История полезна для понимания решений, но устаревшие механизмы PR #1/#2 нельзя
 возвращать без отдельного архитектурного решения.
@@ -478,6 +493,7 @@ CSV delivery, тесты, Docker/Railway.
 - добавлены необходимые regression tests;
 - Ruff и pytest прошли либо честно описан конкретный blocker;
 - README и `AGENTS.md` соответствуют коду;
+- заполнен PR checklist, а `AGENTS.md consistency` прошла, если она применима;
 - создан отдельный draft PR;
 - merge/deploy выполнены только по явной команде;
 - production runtime проверен отдельно после deploy.
