@@ -574,6 +574,182 @@ class VikingClient:
         self._subscriptions.pop(subscription_id, None)
         return parsed
 
+    async def subscribe_portfolio_logs(
+        self,
+        *,
+        robot_id: str,
+        portfolio: str,
+    ) -> dict[str, Any]:
+        """Subscribe to portfolio logs and return the initial log snapshot."""
+        if not robot_id:
+            raise ValueError("robot_id must not be empty")
+        if not portfolio:
+            raise ValueError("portfolio must not be empty")
+
+        response = await self._subscribe(
+            "portfolio_logs.subscribe",
+            {"r_id": robot_id, "p_id": portfolio},
+        )
+        subscription_id = self._required_str(response, "eid")
+        try:
+            event = self._parse_log_subscription_event(
+                response,
+                subscription_id=subscription_id,
+                expected_type="portfolio_logs.subscribe",
+                expected_robot_id=robot_id,
+                expected_portfolio=portfolio,
+                allowed_results={"s"},
+                require_snapshot=True,
+            )
+            return {
+                "subscription_id": subscription_id,
+                "active": True,
+                **event,
+            }
+        except BaseException:
+            self._subscriptions.pop(subscription_id, None)
+            await self.close()
+            raise
+
+    async def get_portfolio_log_updates(
+        self,
+        subscription_id: str,
+        *,
+        wait_seconds: float = 0,
+        max_events: int = 100,
+    ) -> dict[str, Any]:
+        """Return buffered updates for an active portfolio-log subscription."""
+        return await self._get_log_updates(
+            subscription_id,
+            expected_type="portfolio_logs.subscribe",
+            wait_seconds=wait_seconds,
+            max_events=max_events,
+        )
+
+    async def unsubscribe_portfolio_logs(self, subscription_id: str) -> dict[str, Any]:
+        """Unsubscribe from portfolio logs."""
+        return await self._unsubscribe_log_subscription(
+            subscription_id,
+            expected_subscribe_type="portfolio_logs.subscribe",
+            unsubscribe_type="portfolio_logs.unsubscribe",
+        )
+
+    async def subscribe_robot_logs(self, *, robot_id: str) -> dict[str, Any]:
+        """Subscribe to robot logs and return the initial log snapshot."""
+        if not robot_id:
+            raise ValueError("robot_id must not be empty")
+
+        response = await self._subscribe(
+            "robot_logs.subscribe",
+            {"r_id": robot_id},
+        )
+        subscription_id = self._required_str(response, "eid")
+        try:
+            event = self._parse_log_subscription_event(
+                response,
+                subscription_id=subscription_id,
+                expected_type="robot_logs.subscribe",
+                expected_robot_id=robot_id,
+                expected_portfolio=None,
+                allowed_results={"s"},
+                require_snapshot=True,
+            )
+            return {
+                "subscription_id": subscription_id,
+                "active": True,
+                **event,
+            }
+        except BaseException:
+            self._subscriptions.pop(subscription_id, None)
+            await self.close()
+            raise
+
+    async def get_robot_log_updates(
+        self,
+        subscription_id: str,
+        *,
+        wait_seconds: float = 0,
+        max_events: int = 100,
+    ) -> dict[str, Any]:
+        """Return buffered updates for an active robot-log subscription."""
+        return await self._get_log_updates(
+            subscription_id,
+            expected_type="robot_logs.subscribe",
+            wait_seconds=wait_seconds,
+            max_events=max_events,
+        )
+
+    async def unsubscribe_robot_logs(self, subscription_id: str) -> dict[str, Any]:
+        """Unsubscribe from robot logs."""
+        return await self._unsubscribe_log_subscription(
+            subscription_id,
+            expected_subscribe_type="robot_logs.subscribe",
+            unsubscribe_type="robot_logs.unsubscribe",
+        )
+
+    async def get_robot_log_history(
+        self,
+        *,
+        robot_id: str,
+        mint_ns: str,
+        maxt_ns: str,
+        message_filter: str | None = None,
+        limit: int = 100_000,
+    ) -> dict[str, Any]:
+        """Return robot logs received between two epoch-nanosecond bounds."""
+        if not robot_id:
+            raise ValueError("robot_id must not be empty")
+        self._validate_epoch_nsec_bound(mint_ns, "mint_ns")
+        self._validate_epoch_nsec_bound(maxt_ns, "maxt_ns")
+        if int(mint_ns) >= int(maxt_ns):
+            raise ValueError("mint_ns must be earlier than maxt_ns")
+        if message_filter is not None and len(message_filter) > 256:
+            raise ValueError("message_filter must not exceed 256 characters")
+        if not 1 <= limit <= 100_000:
+            raise ValueError("limit must be in range 1..100000")
+
+        request_data: dict[str, Any] = {
+            "r_id": robot_id,
+            "mint": mint_ns,
+            "maxt": maxt_ns,
+            "lim": limit,
+        }
+        if message_filter is not None:
+            request_data["msg"] = message_filter
+
+        response = await self.request("robot_logs.get_history", request_data)
+        result = self._required_str(response, "r")
+        if result != "p":
+            raise VikingProtocolError(
+                "robot_logs.get_history returned an unexpected result; expected r='p'"
+            )
+        data = self._required_dict(response, "data")
+        logs = self._parse_log_rows(
+            data.get("values"),
+            expected_robot_id=robot_id,
+            expected_portfolio=None,
+            require_robot_time=False,
+            require_row_robot_id=True,
+            require_name=True,
+        )
+        normalized_data = dict(data)
+        normalized_data["values"] = logs
+        return {
+            "type": self._required_str(response, "type"),
+            "eid": self._required_str(response, "eid"),
+            "ts": self._required_int(response, "ts"),
+            "r": result,
+            "result": result,
+            "data": normalized_data,
+            "robot_id": robot_id,
+            "mint": mint_ns,
+            "maxt": maxt_ns,
+            "message_filter": message_filter,
+            "limit": limit,
+            "log_count": len(logs),
+            "logs": logs,
+        }
+
     async def get_portfolio_history(
         self,
         *,
@@ -814,6 +990,122 @@ class VikingClient:
                 future.set_exception(exc)
         self._pending.clear()
 
+    async def _get_log_updates(
+        self,
+        subscription_id: str,
+        *,
+        expected_type: str,
+        wait_seconds: float,
+        max_events: int,
+    ) -> dict[str, Any]:
+        subscription = self._subscriptions.get(subscription_id)
+        if subscription is None or subscription.message_type != expected_type:
+            raise ValueError(f"Unknown or inactive {expected_type} subscription_id")
+        if subscription.overflowed:
+            raise VikingProtocolError(
+                f"{expected_type} buffer overflowed and log events were lost; "
+                "unsubscribe and create a new subscription"
+            )
+        if not 0 <= wait_seconds <= 30:
+            raise ValueError("wait_seconds must be in range 0..30")
+        if not 1 <= max_events <= 500:
+            raise ValueError("max_events must be in range 1..500")
+
+        request_data = subscription.request_data or {}
+        expected_robot_id = request_data.get("r_id")
+        expected_portfolio = request_data.get("p_id")
+        if not isinstance(expected_robot_id, str):
+            raise VikingProtocolError("Log subscription metadata is missing r_id")
+        if expected_type == "portfolio_logs.subscribe" and not isinstance(
+            expected_portfolio, str
+        ):
+            raise VikingProtocolError("Portfolio-log subscription metadata is missing p_id")
+
+        messages: list[dict[str, Any]] = []
+        if wait_seconds and subscription.queue.empty():
+            with contextlib.suppress(TimeoutError):
+                messages.append(
+                    await asyncio.wait_for(subscription.queue.get(), timeout=wait_seconds)
+                )
+        while len(messages) < max_events:
+            try:
+                messages.append(subscription.queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+
+        events = []
+        for message in messages:
+            try:
+                self._validate_response_identity(
+                    message,
+                    expected_type=expected_type,
+                    expected_eid=subscription_id,
+                )
+            except VikingProtocolError:
+                self._subscriptions.pop(subscription_id, None)
+                await self.close()
+                raise
+            if message.get("r") == "e":
+                self._subscriptions.pop(subscription_id, None)
+                self._raise_api_error(message)
+            try:
+                event = self._parse_log_subscription_event(
+                    message,
+                    subscription_id=subscription_id,
+                    expected_type=expected_type,
+                    expected_robot_id=expected_robot_id,
+                    expected_portfolio=expected_portfolio,
+                    allowed_results={"s", "u"},
+                    require_snapshot=message.get("r") == "s",
+                )
+            except VikingProtocolError:
+                self._subscriptions.pop(subscription_id, None)
+                await self.close()
+                raise
+            events.append(event)
+
+        active = subscription_id in self._subscriptions
+        return {
+            "subscription_id": subscription_id,
+            "event_count": len(events),
+            "events": events,
+            "active": active,
+            "more_available": active and not subscription.queue.empty(),
+        }
+
+    async def _unsubscribe_log_subscription(
+        self,
+        subscription_id: str,
+        *,
+        expected_subscribe_type: str,
+        unsubscribe_type: str,
+    ) -> dict[str, Any]:
+        subscription = self._subscriptions.get(subscription_id)
+        if subscription is None or subscription.message_type != expected_subscribe_type:
+            raise ValueError(f"Unknown or inactive {expected_subscribe_type} subscription_id")
+        response = await self.request(
+            unsubscribe_type,
+            {"sub_eid": subscription_id},
+        )
+        self._validate_response_identity(response, expected_type=unsubscribe_type)
+        result = self._required_str(response, "r")
+        if result != "p":
+            raise VikingProtocolError(
+                f"{unsubscribe_type} returned an unexpected result; expected r='p'"
+            )
+        parsed = {
+            "subscription_id": subscription_id,
+            "type": self._required_str(response, "type"),
+            "eid": self._required_str(response, "eid"),
+            "ts": self._required_int(response, "ts"),
+            "r": result,
+            "result": result,
+            "data": self._required_dict(response, "data"),
+            "unsubscribed": True,
+        }
+        self._subscriptions.pop(subscription_id, None)
+        return parsed
+
     @classmethod
     def _parse_portfolio_list_data(
         cls, response: dict[str, Any]
@@ -968,6 +1260,143 @@ class VikingClient:
         }
 
     @classmethod
+    def _parse_log_subscription_event(
+        cls,
+        response: dict[str, Any],
+        *,
+        subscription_id: str,
+        expected_type: str,
+        expected_robot_id: str,
+        expected_portfolio: str | None,
+        allowed_results: set[str],
+        require_snapshot: bool,
+    ) -> dict[str, Any]:
+        cls._validate_response_identity(
+            response,
+            expected_type=expected_type,
+            expected_eid=subscription_id,
+        )
+        result = cls._required_str(response, "r")
+        if result not in allowed_results:
+            expected = ", ".join(repr(item) for item in sorted(allowed_results))
+            raise VikingProtocolError(
+                f"{expected_type} returned unexpected r={result!r}; expected {expected}"
+            )
+
+        source_data = cls._required_dict(response, "data")
+        robot_id = cls._required_str(source_data, "r_id")
+        if robot_id != expected_robot_id:
+            raise VikingProtocolError(
+                f"Unexpected log r_id {robot_id!r}; expected {expected_robot_id!r}"
+            )
+
+        portfolio: str | None = None
+        if expected_portfolio is not None:
+            portfolio = cls._required_str(source_data, "p_id")
+            if portfolio != expected_portfolio:
+                raise VikingProtocolError(
+                    f"Unexpected log p_id {portfolio!r}; expected {expected_portfolio!r}"
+                )
+
+        max_time: int | str | None = None
+        if require_snapshot or "mt" in source_data:
+            max_time = cls._required_epoch_nsec(source_data, "mt")
+
+        logs = cls._parse_log_rows(
+            source_data.get("values"),
+            expected_robot_id=expected_robot_id,
+            expected_portfolio=expected_portfolio,
+            require_robot_time=True,
+            require_row_robot_id=False,
+            require_name=False,
+        )
+        data = dict(source_data)
+        data["values"] = logs
+        event = {
+            "type": cls._required_str(response, "type"),
+            "eid": cls._required_str(response, "eid"),
+            "ts": cls._required_int(response, "ts"),
+            "r": result,
+            "result": result,
+            "data": data,
+            "robot_id": robot_id,
+            "values": logs,
+            "logs": logs,
+            "log_count": len(logs),
+        }
+        if portfolio is not None:
+            event["portfolio"] = portfolio
+        if max_time is not None:
+            event["max_time"] = max_time
+        return event
+
+    @classmethod
+    def _parse_log_rows(
+        cls,
+        value: Any,
+        *,
+        expected_robot_id: str,
+        expected_portfolio: str | None,
+        require_robot_time: bool,
+        require_row_robot_id: bool,
+        require_name: bool,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            raise VikingProtocolError("Log response field 'values' must be an array")
+
+        logs = []
+        for index, item in enumerate(value):
+            if not isinstance(item, dict):
+                raise VikingProtocolError(f"Log values[{index}] must be an object")
+            cls._required_int(item, "level")
+            cls._required_str(item, "msg")
+            cls._required_epoch_nsec(item, "dt")
+            if require_robot_time:
+                cls._required_epoch_nsec(item, "t")
+
+            log_id = item.get("id")
+            if log_id is not None and not isinstance(log_id, str):
+                raise VikingProtocolError(f"Log values[{index}].id must be a string")
+            owner = item.get("owner")
+            if owner is not None and not isinstance(owner, str):
+                raise VikingProtocolError(
+                    f"Log values[{index}].owner must be a string or null"
+                )
+
+            row_robot_id = item.get("r_id")
+            if require_row_robot_id and not isinstance(row_robot_id, str):
+                raise VikingProtocolError(
+                    f"Log values[{index}].r_id must be a string"
+                )
+            if row_robot_id is not None:
+                if not isinstance(row_robot_id, str):
+                    raise VikingProtocolError(
+                        f"Log values[{index}].r_id must be a string"
+                    )
+                if row_robot_id != expected_robot_id:
+                    raise VikingProtocolError(
+                        f"Unexpected log values[{index}].r_id {row_robot_id!r}; "
+                        f"expected {expected_robot_id!r}"
+                    )
+
+            name = item.get("name")
+            if require_name and not isinstance(name, str):
+                raise VikingProtocolError(
+                    f"Log values[{index}].name must be a string"
+                )
+            if name is not None and not isinstance(name, str):
+                raise VikingProtocolError(
+                    f"Log values[{index}].name must be a string"
+                )
+            if expected_portfolio is not None and name not in {None, expected_portfolio}:
+                raise VikingProtocolError(
+                    f"Unexpected log values[{index}].name {name!r}; "
+                    f"expected {expected_portfolio!r}"
+                )
+            logs.append(dict(item))
+        return logs
+
+    @classmethod
     def _validate_response_identity(
         cls,
         response: dict[str, Any],
@@ -1022,6 +1451,22 @@ class VikingClient:
         if not isinstance(result, int) or isinstance(result, bool):
             raise VikingProtocolError(f"Response field '{key}' must be an integer")
         return result
+
+    @staticmethod
+    def _required_epoch_nsec(value: dict[str, Any], key: str) -> int | str:
+        result = value.get(key)
+        if isinstance(result, int) and not isinstance(result, bool) and result >= 0:
+            return result
+        if isinstance(result, str) and result.isdigit():
+            return result
+        raise VikingProtocolError(
+            f"Response field '{key}' must be a non-negative epoch_nsec integer or digit string"
+        )
+
+    @staticmethod
+    def _validate_epoch_nsec_bound(value: str, field_name: str) -> None:
+        if not isinstance(value, str) or not value.isdigit():
+            raise ValueError(f"{field_name} must be an epoch_nsec digit string")
 
     @staticmethod
     def decode_messages(raw_message: str | bytes) -> list[dict[str, Any]]:
