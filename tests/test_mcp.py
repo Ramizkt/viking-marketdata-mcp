@@ -54,6 +54,16 @@ async def test_mcp_lists_expected_tools():
     assert tools["get_portfolio_deal_history"].annotations.idempotentHint is True
     assert tools["get_previous_portfolio_deals"].inputSchema["properties"]["limit"]["maximum"] == 100
     assert tools["get_portfolio_deal_history"].inputSchema["properties"]["limit"]["maximum"] == 100_000
+    deal_tools = (
+        "subscribe_portfolio_deals",
+        "get_portfolio_deal_updates",
+        "get_previous_portfolio_deals",
+        "get_portfolio_deal_history",
+    )
+    for tool_name in deal_tools:
+        description = tools[tool_name].description or ""
+        assert "aggr=true" in description
+        assert "цена исходной заявки" in description
     history_schema = tools["get_robot_log_history"].inputSchema["properties"]
     message_filter_string = next(
         option
