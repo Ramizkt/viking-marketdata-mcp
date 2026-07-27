@@ -1,0 +1,59 @@
+name: AGENTS.md consistency
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  agents-context:
+    name: Require AGENTS.md update
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout pull request
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check project context
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t changed_files < <(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+
+          echo "Changed files:"
+          printf '  %s\n' "${changed_files[@]}"
+
+          requires_agents_update=false
+          agents_updated=false
+
+          for file in "${changed_files[@]}"; do
+            case "$file" in
+              AGENTS.md)
+                agents_updated=true
+                ;;
+              app/*|.github/*|Dockerfile|railway.json|pyproject.toml|uv.lock|.env.example)
+                requires_agents_update=true
+                ;;
+            esac
+          done
+
+          if [[ "$requires_agents_update" == true && "$agents_updated" != true ]]; then
+            echo "::error::Project code, configuration, deploy files, or GitHub process changed without an AGENTS.md update."
+            echo "Update AGENTS.md in the same pull request so AI context remains aligned with main."
+            exit 1
+          fi
+
+          if [[ "$requires_agents_update" == true ]]; then
+            echo "AGENTS.md was updated together with project-impacting files."
+          else
+            echo "No project-impacting files require an AGENTS.md update."
+          fi
