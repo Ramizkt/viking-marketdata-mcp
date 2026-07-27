@@ -55,6 +55,10 @@ mcp = FastMCP(
         "get_portfolio_log_updates и unsubscribe_portfolio_logs. Для логов робота используй "
         "subscribe_robot_logs, get_robot_log_updates и unsubscribe_robot_logs; историю логов "
         "получай через get_robot_log_history. "
+        "Для сделок отдельных инструментов портфеля используй subscribe_portfolio_deals, "
+        "get_portfolio_deal_updates и unsubscribe_portfolio_deals; доступные инструменты "
+        "получай через get_portfolio_deal_sec_keys, историю — через "
+        "get_portfolio_deal_history или get_previous_portfolio_deals. "
         "Если пользователь не назвал поля, используй buy, sell и pos. Сервер только читает данные. "
         "Credentials не входят в аргументы MCP-инструментов."
     ),
@@ -630,6 +634,173 @@ async def get_robot_log_history(
                 text=f"Получено записей истории логов робота: {result['log_count']}.",
             )
         ],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Подписаться на сделки портфеля",
+    description=(
+        "Создаёт read-only portfolio_deals.subscribe для конкретного портфеля. "
+        "Возвращает начальный снапшот сделок по отдельным инструментам и subscription_id."
+    ),
+    annotations=SUBSCRIPTION_TOOL,
+)
+async def subscribe_portfolio_deals(
+    robot_id: Annotated[str, Field(min_length=1, description="Идентификатор робота")],
+    portfolio: Annotated[str, Field(min_length=1, description="Имя портфеля")],
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().subscribe_portfolio_deals(
+            robot_id=robot_id, portfolio=portfolio
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Portfolio deals subscription failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[TextContent(
+            type="text",
+            text=f"Подписка на сделки создана. Получено сделок: {result['deal_count']}.",
+        )],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Получить новые сделки портфеля",
+    description=(
+        "Читает накопленные события активной portfolio_deals.subscribe. "
+        "После наблюдения обязательно вызови unsubscribe_portfolio_deals."
+    ),
+    annotations=SUBSCRIPTION_TOOL,
+)
+async def get_portfolio_deal_updates(
+    subscription_id: Annotated[str, Field(min_length=1)],
+    wait_seconds: Annotated[float, Field(ge=0, le=30)] = 0,
+    max_events: Annotated[int, Field(ge=1, le=500)] = 100,
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().get_portfolio_deal_updates(
+            subscription_id=subscription_id,
+            wait_seconds=wait_seconds,
+            max_events=max_events,
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Reading portfolio deal updates failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[TextContent(
+            type="text", text=f"Получено событий сделок: {result['event_count']}."
+        )],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Отписаться от сделок портфеля",
+    description="Вызывает portfolio_deals.unsubscribe с sub_eid активной подписки.",
+    annotations=SUBSCRIPTION_TOOL,
+)
+async def unsubscribe_portfolio_deals(
+    subscription_id: Annotated[str, Field(min_length=1)],
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().unsubscribe_portfolio_deals(
+            subscription_id=subscription_id
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Portfolio deals unsubscribe failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[TextContent(type="text", text="Подписка на сделки закрыта.")],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Получить предыдущие сделки портфеля",
+    description=(
+        "Вызывает portfolio_deals.get_previous: возвращает до 100 сделок старше даты before. "
+        "security_key позволяет выбрать один инструмент внутри арбитражного портфеля."
+    ),
+    annotations=READ_ONLY,
+)
+async def get_previous_portfolio_deals(
+    robot_id: Annotated[str, Field(min_length=1)],
+    portfolio: Annotated[str, Field(min_length=1)],
+    before: Annotated[datetime, Field(description="ISO 8601 с часовым поясом")],
+    security_key: Annotated[str | None, Field(min_length=1)] = None,
+    limit: Annotated[int, Field(ge=1, le=100)] = 100,
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().get_previous_portfolio_deals(
+            robot_id=robot_id, portfolio=portfolio, before=before,
+            security_key=security_key, limit=limit
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Previous portfolio deals request failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[TextContent(type="text", text=f"Получено сделок: {result['deal_count']}.")],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Инструменты из истории сделок",
+    description=(
+        "Вызывает portfolio_deals.get_sec_keys и возвращает уникальные финансовые "
+        "инструменты из истории сделок выбранного портфеля."
+    ),
+    annotations=READ_ONLY,
+)
+async def get_portfolio_deal_sec_keys(
+    robot_id: Annotated[str, Field(min_length=1)],
+    portfolio: Annotated[str, Field(min_length=1)],
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().get_portfolio_deal_sec_keys(
+            robot_id=robot_id, portfolio=portfolio
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Portfolio deal sec keys request failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[TextContent(
+            type="text", text=f"Найдено инструментов: {result['security_count']}."
+        )],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="История сделок портфеля",
+    description=(
+        "Вызывает portfolio_deals.get_history для включительного диапазона дат. "
+        "Возвращает сделки с price, orig_price, buy_sell, quantity, sec, curpos и "
+        "другими атрибутами; security_key фильтрует отдельный инструмент."
+    ),
+    annotations=READ_ONLY,
+)
+async def get_portfolio_deal_history(
+    robot_id: Annotated[str, Field(min_length=1)],
+    portfolio: Annotated[str, Field(min_length=1)],
+    date_from: Annotated[datetime, Field(description="ISO 8601 с часовым поясом")],
+    date_to: Annotated[datetime, Field(description="ISO 8601 с часовым поясом")],
+    security_key: Annotated[str | None, Field(min_length=1)] = None,
+    limit: Annotated[int, Field(ge=1, le=100_000)] = 100_000,
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().get_portfolio_deal_history(
+            robot_id=robot_id, portfolio=portfolio,
+            date_from=date_from, date_to=date_to,
+            security_key=security_key, limit=limit
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Portfolio deal history request failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[TextContent(type="text", text=f"Получено сделок: {result['deal_count']}.")],
         structuredContent=result,
     )
 
