@@ -308,6 +308,109 @@ class VikingClient:
         self._subscriptions.pop(subscription_id, None)
         return parsed
 
+    async def get_template_id(
+        self,
+        *,
+        view: str,
+        object_id: dict[str, str],
+    ) -> dict[str, Any]:
+        """Return the template identifier for a Viking object."""
+        if not view:
+            raise ValueError("view must not be empty")
+        if not object_id:
+            raise ValueError("object_id must not be empty")
+        if not all(isinstance(value, str) and value for value in object_id.values()):
+            raise ValueError("object_id values must be non-empty strings")
+
+        response = await self.request(
+            "get_template_id",
+            {"view": view, "id": object_id},
+        )
+        result = self._required_str(response, "r")
+        if result != "p":
+            raise VikingProtocolError(
+                "get_template_id returned an unexpected result; expected r='p'"
+            )
+        data = self._required_dict(response, "data")
+        template_id = self._required_str(data, "template_id")
+        return {
+            "type": self._required_str(response, "type"),
+            "eid": self._required_str(response, "eid"),
+            "ts": self._required_int(response, "ts"),
+            "r": result,
+            "result": result,
+            "data": data,
+            "template_id": template_id,
+        }
+
+    async def get_template_by_id(self, *, template_id: str) -> dict[str, Any]:
+        """Return a complete Viking template without filtering dynamic fields."""
+        if not template_id:
+            raise ValueError("template_id must not be empty")
+
+        response = await self.request(
+            "get_template_by_id",
+            {"template_id": template_id},
+        )
+        result = self._required_str(response, "r")
+        if result != "p":
+            raise VikingProtocolError(
+                "get_template_by_id returned an unexpected result; expected r='p'"
+            )
+        data = self._required_dict(response, "data")
+        template = self._required_dict(data, "template")
+        template_fields = self._required_dict(template, "template_fields")
+        returned_template_id = self._required_str(template, "template_id")
+        return {
+            "type": self._required_str(response, "type"),
+            "eid": self._required_str(response, "eid"),
+            "ts": self._required_int(response, "ts"),
+            "r": result,
+            "result": result,
+            "data": data,
+            "requested_template_id": template_id,
+            "template_id": returned_template_id,
+            "template": template,
+            "template_fields": template_fields,
+        }
+
+    async def get_portfolio_template(
+        self,
+        *,
+        robot_id: str,
+        portfolio: str,
+    ) -> dict[str, Any]:
+        """Resolve and return the complete template for a portfolio."""
+        if not robot_id:
+            raise ValueError("robot_id must not be empty")
+        if not portfolio:
+            raise ValueError("portfolio must not be empty")
+
+        template_id_response = await self.get_template_id(
+            view="portfolio",
+            object_id={"r_id": robot_id, "p_id": portfolio},
+        )
+        requested_template_id = template_id_response["template_id"]
+        template_response = await self.get_template_by_id(
+            template_id=requested_template_id
+        )
+        return {
+            "robot_id": robot_id,
+            "portfolio": portfolio,
+            "template_id": requested_template_id,
+            "template": template_response["template"],
+            "template_fields": template_response["template_fields"],
+            "get_template_id_response": template_id_response,
+            "get_template_by_id_response": {
+                "type": template_response["type"],
+                "eid": template_response["eid"],
+                "ts": template_response["ts"],
+                "r": template_response["r"],
+                "result": template_response["result"],
+                "returned_template_id": template_response["template_id"],
+            },
+        }
+
     async def get_current_portfolio_data(
         self,
         *,
