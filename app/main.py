@@ -42,6 +42,7 @@ mcp = FastMCP(
         "Пользователь уже прошёл безопасную браузерную OAuth-авторизацию. Никогда не проси "
         "email или API key в чате. Сначала вызывай list_available_portfolios. "
         "Текущее полное состояние портфеля получай через get_current_portfolio_data. "
+        "Схему и назначение динамических полей получай через get_portfolio_template. "
         "Для исторической выгрузки выбирай портфель с history_available=true; "
         "в get_portfolio_data даты всегда передавай с часовым поясом. "
         "Используй delivery=auto: небольшие выборки вернутся inline, большие — CSV-файлом. "
@@ -218,6 +219,46 @@ async def unsubscribe_available_portfolios(
         return _error_result(exc)
     return CallToolResult(
         content=[TextContent(type="text", text="Подписка успешно закрыта.")],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Шаблон портфеля",
+    description=(
+        "Получает полную схему полей портфеля. Автоматически вызывает Viking get_template_id "
+        "с view=portfolio, затем get_template_by_id. Возвращает без фильтрации template_fields "
+        "для portfolio, security, timetable, notifications и любые дополнительные разделы."
+    ),
+    annotations=READ_ONLY,
+)
+async def get_portfolio_template(
+    robot_id: Annotated[str, Field(min_length=1, description="Идентификатор робота")],
+    portfolio: Annotated[str, Field(min_length=1, description="Имя портфеля")],
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().get_portfolio_template(
+            robot_id=robot_id,
+            portfolio=portfolio,
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Portfolio template request failed: %s", exc)
+        return _error_result(exc)
+    field_count = sum(
+        len(fields)
+        for fields in result["template_fields"].values()
+        if isinstance(fields, list)
+    )
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=(
+                    f"Получен шаблон {result['template_id']} для "
+                    f"{robot_id}/{portfolio}: {field_count} полей."
+                ),
+            )
+        ],
         structuredContent=result,
     )
 
