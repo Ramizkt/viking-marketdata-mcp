@@ -4,7 +4,9 @@ import base64
 import hashlib
 import secrets
 import time
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from uuid import uuid4
 
 from mcp.server.auth.provider import AuthorizationParams
 from mcp.shared.auth import OAuthClientInformationFull
@@ -18,13 +20,14 @@ from app.oauth import OAUTH_SCOPE, VikingOAuthProvider
 from app.viking_client import VikingClient
 
 
-def _settings() -> Settings:
+def _settings(tmp_path: Path) -> Settings:
     return Settings(
         public_base_url="http://127.0.0.1:8000",
         export_signing_key="test-only-server-secret",
         oauth_session_idle_ttl_seconds=60,
         oauth_session_max_ttl_seconds=300,
         oauth_persistent_token_ttl_seconds=3600,
+        oauth_client_store_path=tmp_path / "oauth-clients.json",
     )
 
 
@@ -103,8 +106,8 @@ async def _authorize_and_submit(
     return client, authorization_code
 
 
-async def test_session_mode_keeps_credentials_only_in_memory(monkeypatch):
-    provider = VikingOAuthProvider(_settings())
+async def test_session_mode_keeps_credentials_only_in_memory(monkeypatch, tmp_path):
+    provider = VikingOAuthProvider(_settings(tmp_path))
     client, authorization_code = await _authorize_and_submit(
         provider,
         mode="session",
@@ -122,8 +125,8 @@ async def test_session_mode_keeps_credentials_only_in_memory(monkeypatch):
     assert provider.credentials_for_access_token(token.access_token) is None
 
 
-async def test_local_mode_uses_self_contained_encrypted_token(monkeypatch):
-    provider = VikingOAuthProvider(_settings())
+async def test_local_mode_uses_self_contained_encrypted_token(monkeypatch, tmp_path):
+    provider = VikingOAuthProvider(_settings(tmp_path))
     client, authorization_code = await _authorize_and_submit(
         provider,
         mode="local",
@@ -144,8 +147,8 @@ async def test_local_mode_uses_self_contained_encrypted_token(monkeypatch):
     assert await provider.load_access_token(token.access_token) is not None
 
 
-async def test_expired_local_token_is_rejected(monkeypatch):
-    settings = _settings()
+async def test_expired_local_token_is_rejected(monkeypatch, tmp_path):
+    settings = _settings(tmp_path)
     provider = VikingOAuthProvider(settings)
     client, authorization_code = await _authorize_and_submit(
         provider,
@@ -165,13 +168,74 @@ async def test_expired_local_token_is_rejected(monkeypatch):
     assert provider.credentials_for_access_token(token) is None
 
 
-def test_public_metadata_and_complete_oauth_pkce_flow(monkeypatch):
-    from app.main import app
+async def test_oauth_client_registration_survives_restart(tmp_path):
+    settings = _settings(tmp_path)
+    original = _client()
+    first_provider = VikingOAuthProvider(settings)
+    await first_provider.register_client(original)
+
+    restarted_provider = VikingOAuthProvider(settings)
+    restored = await restarted_provider.get_client(original.client_id)
+
+    assert restored is not None
+    assert restored.client_id == original.client_id
+    assert restored.client_secret == original.client_secret
+    assert restored.redirect_uris == original.redirect_uris
+    assert settings.resolved_oauth_client_store_path.stat().st_mode & 0o777 == 0o600
+
+
+async def test_legacy_client_registration_is_recovered_after_login(monkeypatch, tmp_path):
+    async def authenticate(_: VikingClient) -> None:
+        return None
+
+    monkeypatch.setattr(VikingClient, "authenticate", authenticate)
+    settings = _settings(tmp_path)
+    provider = VikingOAuthProvider(settings)
+    client_id = str(uuid4())
+    recovered = await provider.get_client(client_id)
+    assert recovered is not None
+
+    connect_url = await provider.authorize(recovered, _params())
+    pending_id = connect_url.rsplit("/", 1)[-1]
+    app = Starlette(
+        routes=[
+            Route(
+                "/oauth/connect/{pending_id:str}",
+                provider.connect_page,
+                methods=["GET", "POST"],
+            )
+        ]
+    )
+    with TestClient(app, base_url="http://127.0.0.1:8000") as browser:
+        response = browser.post(
+            f"/oauth/connect/{pending_id}",
+            data={
+                "mode": "session",
+                "email": "user@example.com",
+                "api_key": "viking-secret",
+                "role": "trader",
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302
+    restarted_provider = VikingOAuthProvider(settings)
+    restored = await restarted_provider.get_client(client_id)
+    assert restored is not None
+    assert restored.token_endpoint_auth_method == "none"
+    assert [str(uri) for uri in restored.redirect_uris or []] == [
+        "http://127.0.0.1:9876/callback"
+    ]
+
+
+def test_public_metadata_and_complete_oauth_pkce_flow(monkeypatch, tmp_path):
+    from app.main import app, oauth_provider
 
     async def authenticate(_: VikingClient) -> None:
         return None
 
     monkeypatch.setattr(VikingClient, "authenticate", authenticate)
+    oauth_provider._client_store_path = tmp_path / "oauth-clients.json"
     verifier = secrets.token_urlsafe(48)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
 
