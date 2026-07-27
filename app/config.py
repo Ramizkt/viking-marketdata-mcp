@@ -25,6 +25,7 @@ class Settings(BaseSettings):
         ge=3_600,
         le=31_536_000,
     )
+    oauth_client_store_path: Path | None = None
     credential_token_key: str = ""
 
     public_base_url: str = ""
@@ -45,6 +46,12 @@ class Settings(BaseSettings):
         if self.railway_public_domain:
             return f"https://{self.railway_public_domain}".rstrip("/")
         return f"http://127.0.0.1:{self.port}"
+
+    @property
+    def resolved_oauth_client_store_path(self) -> Path:
+        if self.oauth_client_store_path is not None:
+            return self.oauth_client_store_path
+        return self.export_dir.parent / "oauth-clients.json"
 
 
 @lru_cache
