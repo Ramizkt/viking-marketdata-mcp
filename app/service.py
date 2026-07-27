@@ -191,6 +191,79 @@ class MarketDataService:
             "date_to": date_to.astimezone(UTC).isoformat(),
         }
 
+    async def subscribe_portfolio_deals(
+        self, *, robot_id: str, portfolio: str
+    ) -> dict[str, Any]:
+        return await self.client.subscribe_portfolio_deals(
+            robot_id=robot_id, portfolio=portfolio
+        )
+
+    async def get_portfolio_deal_updates(
+        self, *, subscription_id: str, wait_seconds: float, max_events: int
+    ) -> dict[str, Any]:
+        return await self.client.get_portfolio_deal_updates(
+            subscription_id, wait_seconds=wait_seconds, max_events=max_events
+        )
+
+    async def unsubscribe_portfolio_deals(
+        self, *, subscription_id: str
+    ) -> dict[str, Any]:
+        return await self.client.unsubscribe_portfolio_deals(subscription_id)
+
+    async def get_previous_portfolio_deals(
+        self,
+        *,
+        robot_id: str,
+        portfolio: str,
+        before: datetime,
+        security_key: str | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        before_ns = self._to_epoch_ns(before, "before")
+        result = await self.client.get_previous_portfolio_deals(
+            robot_id=robot_id,
+            portfolio=portfolio,
+            before_ns=before_ns,
+            security_key=security_key,
+            limit=limit,
+        )
+        return {**result, "before": before.astimezone(UTC).isoformat()}
+
+    async def get_portfolio_deal_sec_keys(
+        self, *, robot_id: str, portfolio: str
+    ) -> dict[str, Any]:
+        return await self.client.get_portfolio_deal_sec_keys(
+            robot_id=robot_id, portfolio=portfolio
+        )
+
+    async def get_portfolio_deal_history(
+        self,
+        *,
+        robot_id: str,
+        portfolio: str,
+        date_from: datetime,
+        date_to: datetime,
+        security_key: str | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        mint_ns = self._to_epoch_ns(date_from, "date_from")
+        maxt_ns = self._to_epoch_ns(date_to, "date_to")
+        if int(mint_ns) > int(maxt_ns):
+            raise ValueError("date_from must not be later than date_to")
+        result = await self.client.get_portfolio_deal_history(
+            robot_id=robot_id,
+            portfolio=portfolio,
+            mint_ns=mint_ns,
+            maxt_ns=maxt_ns,
+            security_key=security_key,
+            limit=limit,
+        )
+        return {
+            **result,
+            "date_from": date_from.astimezone(UTC).isoformat(),
+            "date_to": date_to.astimezone(UTC).isoformat(),
+        }
+
     async def get_portfolio_data(
         self,
         *,
