@@ -114,6 +114,83 @@ class MarketDataService:
     async def unsubscribe_portfolio(self, *, subscription_id: str) -> dict[str, Any]:
         return await self.client.unsubscribe_portfolio(subscription_id)
 
+    async def subscribe_portfolio_logs(
+        self,
+        *,
+        robot_id: str,
+        portfolio: str,
+    ) -> dict[str, Any]:
+        return await self.client.subscribe_portfolio_logs(
+            robot_id=robot_id,
+            portfolio=portfolio,
+        )
+
+    async def get_portfolio_log_updates(
+        self,
+        *,
+        subscription_id: str,
+        wait_seconds: float,
+        max_events: int,
+    ) -> dict[str, Any]:
+        return await self.client.get_portfolio_log_updates(
+            subscription_id,
+            wait_seconds=wait_seconds,
+            max_events=max_events,
+        )
+
+    async def unsubscribe_portfolio_logs(self, *, subscription_id: str) -> dict[str, Any]:
+        return await self.client.unsubscribe_portfolio_logs(subscription_id)
+
+    async def subscribe_robot_logs(self, *, robot_id: str) -> dict[str, Any]:
+        return await self.client.subscribe_robot_logs(robot_id=robot_id)
+
+    async def get_robot_log_updates(
+        self,
+        *,
+        subscription_id: str,
+        wait_seconds: float,
+        max_events: int,
+    ) -> dict[str, Any]:
+        return await self.client.get_robot_log_updates(
+            subscription_id,
+            wait_seconds=wait_seconds,
+            max_events=max_events,
+        )
+
+    async def unsubscribe_robot_logs(self, *, subscription_id: str) -> dict[str, Any]:
+        return await self.client.unsubscribe_robot_logs(subscription_id)
+
+    async def get_robot_log_history(
+        self,
+        *,
+        robot_id: str,
+        date_from: datetime,
+        date_to: datetime,
+        message_filter: str | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        mint_ns = self._to_epoch_ns(date_from, "date_from")
+        maxt_ns = self._to_epoch_ns(date_to, "date_to")
+        if int(mint_ns) >= int(maxt_ns):
+            raise ValueError("date_from must be earlier than date_to")
+        if message_filter is not None and len(message_filter) > 256:
+            raise ValueError("message_filter must not exceed 256 characters")
+        if not 1 <= limit <= 100_000:
+            raise ValueError("limit must be in range 1..100000")
+
+        result = await self.client.get_robot_log_history(
+            robot_id=robot_id,
+            mint_ns=mint_ns,
+            maxt_ns=maxt_ns,
+            message_filter=message_filter,
+            limit=limit,
+        )
+        return {
+            **result,
+            "date_from": date_from.astimezone(UTC).isoformat(),
+            "date_to": date_to.astimezone(UTC).isoformat(),
+        }
+
     async def get_portfolio_data(
         self,
         *,
@@ -267,3 +344,16 @@ class MarketDataService:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError(f"{field_name} must include a timezone offset, for example +03:00 or Z")
         return int(value.timestamp() * 1000)
+
+    @staticmethod
+    def _to_epoch_ns(value: datetime, field_name: str) -> str:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(f"{field_name} must include a timezone offset, for example +03:00 or Z")
+        utc_value = value.astimezone(UTC)
+        epoch = datetime(1970, 1, 1, tzinfo=UTC)
+        delta = utc_value - epoch
+        total_microseconds = (
+            (delta.days * 86_400 + delta.seconds) * 1_000_000
+            + delta.microseconds
+        )
+        return str(total_microseconds * 1_000)
