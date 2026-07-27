@@ -2,7 +2,7 @@
 
 Публичный read-only MCP-сервер поверх WebSocket API `bot.fkviking.com`.
 
-Он предоставляет 17 инструментов:
+Он предоставляет 23 инструмента:
 
 - `list_available_portfolios` — доступные пользователю портфели;
 - `subscribe_available_portfolios` — подписка на изменения списка портфелей;
@@ -20,6 +20,12 @@
 - `get_robot_log_updates` — чтение накопленных логов робота;
 - `unsubscribe_robot_logs` — завершение подписки на логи робота;
 - `get_robot_log_history` — история логов робота за период;
+- `subscribe_portfolio_deals` — подписка на новые сделки по инструментам портфеля;
+- `get_portfolio_deal_updates` — чтение накопленных новых сделок;
+- `unsubscribe_portfolio_deals` — завершение подписки на сделки;
+- `get_previous_portfolio_deals` — до 100 сделок старше указанной даты;
+- `get_portfolio_deal_sec_keys` — уникальные инструменты из истории сделок;
+- `get_portfolio_deal_history` — история сделок за период с фильтром по инструменту;
 - `get_portfolio_data` — история выбранного портфеля за период.
 
 Небольшой результат возвращается непосредственно в MCP. Большой результат
