@@ -530,3 +530,135 @@ async def test_get_current_portfolio_data_unsubscribes_immediately():
     client.unsubscribe_portfolio.assert_awaited_once_with("portfolio-sub-1")
     assert result["active"] is False
     assert result["unsubscribed"] is True
+
+
+async def test_get_template_id_sends_portfolio_object_and_preserves_response():
+    client = object.__new__(VikingClient)
+    client.request = AsyncMock(
+        return_value={
+            "type": "get_template_id",
+            "eid": "request-template-id",
+            "ts": 800,
+            "r": "p",
+            "data": {"template_id": "portfolio_viking_base"},
+        }
+    )
+
+    result = await client.get_template_id(
+        view="portfolio",
+        object_id={"r_id": "1", "p_id": "alpha"},
+    )
+
+    client.request.assert_awaited_once_with(
+        "get_template_id",
+        {
+            "view": "portfolio",
+            "id": {"r_id": "1", "p_id": "alpha"},
+        },
+    )
+    assert result["template_id"] == "portfolio_viking_base"
+    assert result["data"] == {"template_id": "portfolio_viking_base"}
+    assert result["result"] == "p"
+
+
+async def test_get_template_by_id_preserves_complete_template():
+    client = object.__new__(VikingClient)
+    template = {
+        "_comment": "dynamic template",
+        "template_id": "portfolio_viking_base",
+        "template_fields": {
+            "portfolio": [{"field": "uf0", "formatter": "number"}],
+            "security": [{"field": "pos", "formatter": "integer"}],
+            "custom_group": [{"field": "custom", "nested": {"x": 1}}],
+        },
+    }
+    client.request = AsyncMock(
+        return_value={
+            "type": "get_template_by_id",
+            "eid": "request-template",
+            "ts": 801,
+            "r": "p",
+            "data": {"template": template},
+        }
+    )
+
+    result = await client.get_template_by_id(
+        template_id="portfolio_viking_base"
+    )
+
+    client.request.assert_awaited_once_with(
+        "get_template_by_id",
+        {"template_id": "portfolio_viking_base"},
+    )
+    assert result["template"] == template
+    assert result["template_fields"]["custom_group"][0]["nested"] == {"x": 1}
+    assert result["requested_template_id"] == "portfolio_viking_base"
+
+
+async def test_get_portfolio_template_resolves_id_before_template():
+    client = object.__new__(VikingClient)
+    client.get_template_id = AsyncMock(
+        return_value={
+            "type": "get_template_id",
+            "eid": "request-template-id",
+            "ts": 800,
+            "r": "p",
+            "result": "p",
+            "data": {"template_id": "portfolio_viking_base"},
+            "template_id": "portfolio_viking_base",
+        }
+    )
+    client.get_template_by_id = AsyncMock(
+        return_value={
+            "type": "get_template_by_id",
+            "eid": "request-template",
+            "ts": 801,
+            "r": "p",
+            "result": "p",
+            "data": {},
+            "requested_template_id": "portfolio_viking_base",
+            "template_id": "portfolio_viking_base",
+            "template": {
+                "template_id": "portfolio_viking_base",
+                "template_fields": {"portfolio": [{"field": "uf0"}]},
+            },
+            "template_fields": {"portfolio": [{"field": "uf0"}]},
+        }
+    )
+
+    result = await client.get_portfolio_template(
+        robot_id="1",
+        portfolio="alpha",
+    )
+
+    client.get_template_id.assert_awaited_once_with(
+        view="portfolio",
+        object_id={"r_id": "1", "p_id": "alpha"},
+    )
+    client.get_template_by_id.assert_awaited_once_with(
+        template_id="portfolio_viking_base"
+    )
+    assert result["template_id"] == "portfolio_viking_base"
+    assert result["template_fields"]["portfolio"][0]["field"] == "uf0"
+    assert result["get_template_by_id_response"]["returned_template_id"] == (
+        "portfolio_viking_base"
+    )
+
+
+async def test_get_template_id_rejects_malformed_success_response():
+    client = object.__new__(VikingClient)
+    client.request = AsyncMock(
+        return_value={
+            "type": "get_template_id",
+            "eid": "request-template-id",
+            "ts": 800,
+            "r": "p",
+            "data": {},
+        }
+    )
+
+    with pytest.raises(VikingProtocolError, match="template_id"):
+        await client.get_template_id(
+            view="portfolio",
+            object_id={"r_id": "1", "p_id": "alpha"},
+        )
