@@ -45,6 +45,7 @@ class _Subscription:
     message_type: str
     queue: asyncio.Queue[dict[str, Any]]
     overflowed: bool = False
+    request_data: dict[str, Any] | None = None
 
 
 @dataclass
@@ -307,6 +308,169 @@ class VikingClient:
         self._subscriptions.pop(subscription_id, None)
         return parsed
 
+    async def get_current_portfolio_data(
+        self,
+        *,
+        robot_id: str,
+        portfolio: str,
+    ) -> dict[str, Any]:
+        """Return one complete current portfolio snapshot and close its subscription."""
+        snapshot = await self.subscribe_portfolio(
+            robot_id=robot_id,
+            portfolio=portfolio,
+        )
+        subscription_id = snapshot["subscription_id"]
+        try:
+            unsubscribe_response = await self.unsubscribe_portfolio(subscription_id)
+        except BaseException:
+            self._subscriptions.pop(subscription_id, None)
+            await self.close()
+            raise
+        return {
+            **snapshot,
+            "active": False,
+            "unsubscribed": True,
+            "unsubscribe_response": unsubscribe_response,
+        }
+
+    async def subscribe_portfolio(
+        self,
+        *,
+        robot_id: str,
+        portfolio: str,
+    ) -> dict[str, Any]:
+        """Subscribe to a portfolio and return its complete initial snapshot."""
+        if not robot_id:
+            raise ValueError("robot_id must not be empty")
+        if not portfolio:
+            raise ValueError("portfolio must not be empty")
+
+        response = await self._subscribe(
+            "portfolio.subscribe",
+            {"r_id": robot_id, "p_id": portfolio},
+        )
+        subscription_id = self._required_str(response, "eid")
+        try:
+            event = self._parse_portfolio_subscription_event(
+                response,
+                subscription_id=subscription_id,
+                expected_robot_id=robot_id,
+                expected_portfolio=portfolio,
+                allowed_results={"s"},
+                require_complete_snapshot=True,
+            )
+            return {
+                "subscription_id": subscription_id,
+                "active": True,
+                **event,
+            }
+        except BaseException:
+            self._subscriptions.pop(subscription_id, None)
+            await self.close()
+            raise
+
+    async def get_portfolio_updates(
+        self,
+        subscription_id: str,
+        *,
+        wait_seconds: float = 0,
+        max_events: int = 100,
+    ) -> dict[str, Any]:
+        """Return buffered snapshots and updates for an active portfolio subscription."""
+        subscription = self._subscriptions.get(subscription_id)
+        if subscription is None or subscription.message_type != "portfolio.subscribe":
+            raise ValueError("Unknown or inactive portfolio subscription_id")
+        if subscription.overflowed:
+            raise VikingProtocolError(
+                "Portfolio subscription buffer overflowed and events were lost; "
+                "unsubscribe and create a new subscription"
+            )
+        if not 0 <= wait_seconds <= 30:
+            raise ValueError("wait_seconds must be in range 0..30")
+        if not 1 <= max_events <= 500:
+            raise ValueError("max_events must be in range 1..500")
+
+        request_data = subscription.request_data or {}
+        expected_robot_id = request_data.get("r_id")
+        expected_portfolio = request_data.get("p_id")
+        if not isinstance(expected_robot_id, str) or not isinstance(expected_portfolio, str):
+            raise VikingProtocolError("Portfolio subscription metadata is missing r_id or p_id")
+
+        messages: list[dict[str, Any]] = []
+        if wait_seconds and subscription.queue.empty():
+            with contextlib.suppress(TimeoutError):
+                messages.append(
+                    await asyncio.wait_for(subscription.queue.get(), timeout=wait_seconds)
+                )
+        while len(messages) < max_events:
+            try:
+                messages.append(subscription.queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+
+        events = []
+        for message in messages:
+            self._validate_response_identity(
+                message,
+                expected_type="portfolio.subscribe",
+                expected_eid=subscription_id,
+            )
+            if message.get("r") == "e":
+                self._subscriptions.pop(subscription_id, None)
+                self._raise_api_error(message)
+            event = self._parse_portfolio_subscription_event(
+                message,
+                subscription_id=subscription_id,
+                expected_robot_id=expected_robot_id,
+                expected_portfolio=expected_portfolio,
+                allowed_results={"s", "u"},
+                require_complete_snapshot=message.get("r") == "s",
+            )
+            events.append(event)
+            if event["deleted"]:
+                self._subscriptions.pop(subscription_id, None)
+                break
+
+        active = subscription_id in self._subscriptions
+        return {
+            "subscription_id": subscription_id,
+            "event_count": len(events),
+            "events": events,
+            "active": active,
+            "more_available": active and not subscription.queue.empty(),
+        }
+
+    async def unsubscribe_portfolio(self, subscription_id: str) -> dict[str, Any]:
+        """Unsubscribe from portfolio updates and return the full acknowledgement."""
+        subscription = self._subscriptions.get(subscription_id)
+        if subscription is None or subscription.message_type != "portfolio.subscribe":
+            raise ValueError("Unknown or inactive portfolio subscription_id")
+        response = await self.request(
+            "portfolio.unsubscribe",
+            {"sub_eid": subscription_id},
+        )
+        self._validate_response_identity(
+            response,
+            expected_type="portfolio.unsubscribe",
+        )
+        result = self._required_str(response, "r")
+        if result != "p":
+            raise VikingProtocolError(
+                "portfolio.unsubscribe returned an unexpected result; expected r='p'"
+            )
+        parsed = {
+            "subscription_id": subscription_id,
+            "type": self._required_str(response, "type"),
+            "eid": self._required_str(response, "eid"),
+            "ts": self._required_int(response, "ts"),
+            "r": result,
+            "result": result,
+            "data": self._required_dict(response, "data"),
+            "unsubscribed": True,
+        }
+        self._subscriptions.pop(subscription_id, None)
+        return parsed
+
     async def get_portfolio_history(
         self,
         *,
@@ -455,7 +619,11 @@ class VikingClient:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
         self._pending[eid] = future
-        self._subscriptions[eid] = _Subscription(message_type, asyncio.Queue(maxsize=1_000))
+        self._subscriptions[eid] = _Subscription(
+            message_type,
+            asyncio.Queue(maxsize=1_000),
+            request_data=dict(data),
+        )
         payload = {"type": message_type, "data": data, "eid": eid}
         try:
             async with self._send_lock:
@@ -609,6 +777,91 @@ class VikingClient:
             "data": data,
             "portfolios_add": portfolios_add,
             "portfolios_del": portfolios_del,
+        }
+
+    @classmethod
+    def _parse_portfolio_subscription_event(
+        cls,
+        response: dict[str, Any],
+        *,
+        subscription_id: str,
+        expected_robot_id: str,
+        expected_portfolio: str,
+        allowed_results: set[str],
+        require_complete_snapshot: bool = False,
+    ) -> dict[str, Any]:
+        cls._validate_response_identity(
+            response,
+            expected_type="portfolio.subscribe",
+            expected_eid=subscription_id,
+        )
+        result = cls._required_str(response, "r")
+        if result not in allowed_results:
+            expected = ", ".join(repr(item) for item in sorted(allowed_results))
+            raise VikingProtocolError(
+                f"Portfolio response has unexpected r={result!r}; expected {expected}"
+            )
+
+        source_data = cls._required_dict(response, "data")
+        robot_id = cls._required_str(source_data, "r_id")
+        portfolio = cls._required_str(source_data, "p_id")
+        if robot_id != expected_robot_id:
+            raise VikingProtocolError(
+                f"Unexpected portfolio r_id {robot_id!r}; expected {expected_robot_id!r}"
+            )
+        if portfolio != expected_portfolio:
+            raise VikingProtocolError(
+                f"Unexpected portfolio p_id {portfolio!r}; expected {expected_portfolio!r}"
+            )
+
+        value = cls._required_dict(source_data, "value")
+        name = cls._required_str(value, "name")
+        if name != portfolio:
+            raise VikingProtocolError(
+                f"Portfolio snapshot name {name!r} does not match p_id {portfolio!r}"
+            )
+
+        action = value.get("__action")
+        if action is not None and action != "del":
+            raise VikingProtocolError("Portfolio __action must be 'del' when present")
+        deleted = action == "del"
+
+        if require_complete_snapshot and "securities" not in value:
+            raise VikingProtocolError("Portfolio snapshot is missing securities")
+        securities = value.get("securities")
+        if securities is not None:
+            if not isinstance(securities, dict):
+                raise VikingProtocolError("Portfolio securities must be an object")
+            for security_key, security in securities.items():
+                if not isinstance(security, dict):
+                    raise VikingProtocolError(
+                        f"Portfolio security {security_key!r} must be an object"
+                    )
+                sec_key = cls._required_str(security, "sec_key")
+                if sec_key != security_key:
+                    raise VikingProtocolError(
+                        f"Portfolio security key {security_key!r} does not match "
+                        f"sec_key {sec_key!r}"
+                    )
+                security_action = security.get("__action")
+                if security_action is not None and security_action != "del":
+                    raise VikingProtocolError(
+                        f"Portfolio security {security_key!r} __action must be 'del'"
+                    )
+
+        data = dict(source_data)
+        data["value"] = dict(value)
+        return {
+            "type": cls._required_str(response, "type"),
+            "eid": cls._required_str(response, "eid"),
+            "ts": cls._required_int(response, "ts"),
+            "r": result,
+            "result": result,
+            "data": data,
+            "robot_id": robot_id,
+            "portfolio": portfolio,
+            "value": data["value"],
+            "deleted": deleted,
         }
 
     @classmethod
