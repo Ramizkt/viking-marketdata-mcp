@@ -2,7 +2,7 @@
 
 Публичный read-only MCP-сервер поверх WebSocket API `bot.fkviking.com`.
 
-Он предоставляет 39 инструментов:
+Он предоставляет 42 инструмента:
 
 - `list_available_portfolios` — доступные пользователю портфели;
 - `subscribe_available_portfolios` — подписка на изменения списка портфелей;
@@ -46,6 +46,11 @@
   `unsubscribe_transaction_orders` — активные заявки подключения;
 - `subscribe_transaction_positions`, `get_transaction_position_updates`,
   `unsubscribe_transaction_positions` — позиции подключения;
+- `get_robot_securities` — все доступные роботу финансовые инструменты с
+  фильтром по битовой маске `sec_type` и опциональным принудительным reload;
+- `get_robot_client_codes` — доступные роботу клиентские коды и их `sec_type`;
+- `find_security` — поиск точного SecKey в портфеле, роботе или во всех
+  доступных роботах, включая вхождения в формулах;
 - `get_portfolio_data` — история выбранного портфеля за период.
 
 Небольшой результат возвращается непосредственно в MCP. Большой результат
@@ -73,6 +78,23 @@ Transactional connections пользователь добавляет из до�
 `trans_conn.get_used_secs`. В таблице запроса официального `api.md` ошибочно
 указан `trans_conn.get`; пример и ответы подтверждают
 `trans_conn.get_used_secs`.
+
+### Инструменты и клиентские коды робота
+
+`get_robot_securities` использует `robot.get_securities`. Viking может разбить
+ответ на несколько сообщений с одним `eid`; пока `data.next=true`, MCP ожидает
+следующую страницу и возвращает объединённый список. `reload=false` читает
+backend-кэш, `reload=true` принудительно перечитывает данные из робота.
+Необязательный `sec_type` — числовая битовая маска типов инструментов.
+
+`get_robot_client_codes` возвращает пары `sec_type` и `ll`, где `ll` — уникальная
+метка клиентского кода.
+
+`find_security` всегда требует точный `security_key` (Viking `key`). Без
+`robot_id` и `portfolio` поиск выполняется по всем доступным роботам; `robot_id`
+сужает его до робота, а `portfolio` — до портфеля. Результат содержит портфели,
+где установлен SecKey, и найденные в формулах вхождения с исходными полями
+`pos`, `text`, `sec`, `title`, `field`, `value` и `disabled`.
 
 ## Подключение
 
