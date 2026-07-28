@@ -89,6 +89,12 @@ async def test_mcp_lists_expected_tools():
         description = tools[tool_name].description or ""
         assert "aggr=true" in description
         assert "цена исходной заявки" in description
+        assert "не фильтруй" in description
+        assert "учитывать во всех подсчётах и расчётах" in description
+    instructions = main.mcp._mcp_server.instructions or ""
+    assert "aggr=true не фильтруй" in instructions
+    assert "учитывать во всех подсчётах и расчётах" in instructions
+    assert "такую запись также не исключай" in instructions
     history_schema = tools["get_robot_log_history"].inputSchema["properties"]
     message_filter_string = next(
         option
