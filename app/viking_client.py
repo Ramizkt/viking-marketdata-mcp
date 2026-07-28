@@ -936,6 +936,145 @@ class VikingClient:
             security_key=security_key, limit=limit
         )
 
+    async def get_robot_securities(
+        self,
+        *,
+        robot_id: str,
+        reload: bool = False,
+        sec_type: int | None = None,
+    ) -> dict[str, Any]:
+        """Return every page of securities available in a robot."""
+        if not robot_id:
+            raise ValueError("robot_id must not be empty")
+        if not isinstance(reload, bool):
+            raise ValueError("reload must be a boolean")
+        if sec_type is not None and (
+            isinstance(sec_type, bool) or not isinstance(sec_type, int) or sec_type < 0
+        ):
+            raise ValueError("sec_type must be a non-negative integer bit mask")
+
+        request_data: dict[str, Any] = {"r_id": robot_id, "reload": reload}
+        if sec_type is not None:
+            request_data["sec_type"] = sec_type
+        first = await self._subscribe("robot.get_securities", request_data)
+        request_id = self._required_str(first, "eid")
+        subscription = self._subscriptions.get(request_id)
+        pages = [first]
+        try:
+            while self._required_bool(
+                self._required_dict(pages[-1], "data"), "next"
+            ):
+                if subscription is None:
+                    raise VikingProtocolError(
+                        "robot.get_securities pagination state was lost"
+                    )
+                pages.append(
+                    await asyncio.wait_for(
+                        subscription.queue.get(),
+                        timeout=self.settings.viking_request_timeout_seconds,
+                    )
+                )
+        finally:
+            self._subscriptions.pop(request_id, None)
+
+        securities: dict[str, dict[str, Any]] = {}
+        for page in pages:
+            self._validate_response_identity(
+                page, expected_type="robot.get_securities", expected_eid=request_id
+            )
+            if self._required_str(page, "r") != "p":
+                raise VikingProtocolError("robot.get_securities returned unexpected result")
+            values = self._required_dict(self._required_dict(page, "data"), "securities")
+            for key, security in values.items():
+                if not isinstance(security, dict):
+                    raise VikingProtocolError(f"Security {key!r} must be an object")
+                if self._required_str(security, "sec_key") != key:
+                    raise VikingProtocolError(
+                        f"Security key {key!r} does not match sec_key"
+                    )
+                securities[key] = dict(security)
+        return {
+            "type": "robot.get_securities",
+            "eid": request_id,
+            "ts": self._required_int(pages[-1], "ts"),
+            "r": "p",
+            "result": "p",
+            "robot_id": robot_id,
+            "reload": reload,
+            "sec_type": sec_type,
+            "page_count": len(pages),
+            "security_count": len(securities),
+            "securities": securities,
+        }
+
+    async def get_robot_client_codes(self, *, robot_id: str) -> dict[str, Any]:
+        if not robot_id:
+            raise ValueError("robot_id must not be empty")
+        response = await self.request("robot.get_client_codes", {"r_id": robot_id})
+        parsed = self._parse_plain_response(response, "robot.get_client_codes")
+        data = parsed["data"]
+        if self._required_str(data, "r_id") != robot_id:
+            raise VikingProtocolError("Unexpected robot.get_client_codes r_id")
+        values = data.get("values")
+        if not isinstance(values, list):
+            raise VikingProtocolError("robot.get_client_codes values must be an array")
+        client_codes = []
+        for index, item in enumerate(values):
+            if not isinstance(item, dict):
+                raise VikingProtocolError(f"Client code {index} must be an object")
+            sec_type = self._required_int(item, "sec_type")
+            label = self._required_str(item, "ll")
+            client_codes.append({**item, "sec_type": sec_type, "ll": label})
+        return {
+            **parsed,
+            "robot_id": robot_id,
+            "client_code_count": len(client_codes),
+            "client_codes": client_codes,
+        }
+
+    async def find_security(
+        self,
+        *,
+        security_key: str,
+        robot_id: str | None = None,
+        portfolio: str | None = None,
+    ) -> dict[str, Any]:
+        if not security_key:
+            raise ValueError("security_key must not be empty")
+        if robot_id is not None and not robot_id:
+            raise ValueError("robot_id must not be empty")
+        if portfolio is not None and not portfolio:
+            raise ValueError("portfolio must not be empty")
+        request_data: dict[str, Any] = {"key": security_key}
+        if robot_id is not None:
+            request_data["r_id"] = robot_id
+        if portfolio is not None:
+            request_data["p_id"] = portfolio
+        response = await self.request("robot.find_security", request_data)
+        parsed = self._parse_plain_response(response, "robot.find_security")
+        data = parsed["data"]
+        if self._required_str(data, "key") != security_key:
+            raise VikingProtocolError("Unexpected robot.find_security key")
+        portfolios = data.get("portfolios")
+        formulas = data.get("formulas")
+        if not isinstance(portfolios, list) or not all(
+            isinstance(item, dict) for item in portfolios
+        ):
+            raise VikingProtocolError("robot.find_security portfolios must be an array")
+        if not isinstance(formulas, list) or not all(
+            isinstance(item, dict) for item in formulas
+        ):
+            raise VikingProtocolError("robot.find_security formulas must be an array")
+        return {
+            **parsed,
+            "security_key": security_key,
+            "scope": {"robot_id": robot_id, "portfolio": portfolio},
+            "portfolio_count": len(portfolios),
+            "formula_match_count": len(formulas),
+            "portfolios": [dict(item) for item in portfolios],
+            "formulas": [dict(item) for item in formulas],
+        }
+
     async def subscribe_data_connections(self, *, robot_id: str) -> dict[str, Any]:
         return await self._subscribe_connection_feed(
             "data_conn.subscribe", robot_id=robot_id, connection=None
@@ -2135,6 +2274,13 @@ class VikingClient:
         result = value.get(key)
         if not isinstance(result, int) or isinstance(result, bool):
             raise VikingProtocolError(f"Response field '{key}' must be an integer")
+        return result
+
+    @staticmethod
+    def _required_bool(value: dict[str, Any], key: str) -> bool:
+        result = value.get(key)
+        if not isinstance(result, bool):
+            raise VikingProtocolError(f"{key} must be a boolean")
         return result
 
     @staticmethod
