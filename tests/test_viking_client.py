@@ -1,6 +1,7 @@
 import asyncio
 import json
 import zlib
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -1404,3 +1405,96 @@ async def test_connection_unsubscribe_uses_subscription_eid():
         "trans_conn_poses.unsubscribe", {"sub_eid": "poses-sub-1"}
     )
     assert result["unsubscribed"] is True
+
+
+async def test_get_robot_securities_collects_all_next_pages():
+    client = object.__new__(VikingClient)
+    queue = asyncio.Queue()
+    await queue.put({
+        "type": "robot.get_securities",
+        "eid": "secs-1",
+        "ts": 17,
+        "r": "p",
+        "data": {
+            "next": False,
+            "securities": {"ETH": {"sec_key": "ETH", "custom": 2}},
+        },
+    })
+    client._subscriptions = {
+        "secs-1": _Subscription("robot.get_securities", queue)
+    }
+    client.settings = SimpleNamespace(viking_request_timeout_seconds=1)
+    client._subscribe = AsyncMock(return_value={
+        "type": "robot.get_securities",
+        "eid": "secs-1",
+        "ts": 16,
+        "r": "p",
+        "data": {
+            "next": True,
+            "securities": {"BTC": {"sec_key": "BTC", "custom": 1}},
+        },
+    })
+
+    result = await client.get_robot_securities(
+        robot_id="1", reload=True, sec_type=3
+    )
+
+    client._subscribe.assert_awaited_once_with(
+        "robot.get_securities", {"r_id": "1", "reload": True, "sec_type": 3}
+    )
+    assert result["page_count"] == 2
+    assert result["security_count"] == 2
+    assert result["securities"]["ETH"]["custom"] == 2
+    assert "secs-1" not in client._subscriptions
+
+
+async def test_get_robot_client_codes_preserves_dynamic_fields():
+    client = object.__new__(VikingClient)
+    client.request = AsyncMock(return_value={
+        "type": "robot.get_client_codes",
+        "eid": "codes-1",
+        "ts": 18,
+        "r": "p",
+        "data": {
+            "r_id": "1",
+            "values": [{"sec_type": 1048576, "ll": "bitmex_send_x/y", "extra": 1}],
+        },
+    })
+
+    result = await client.get_robot_client_codes(robot_id="1")
+
+    client.request.assert_awaited_once_with(
+        "robot.get_client_codes", {"r_id": "1"}
+    )
+    assert result["client_code_count"] == 1
+    assert result["client_codes"][0]["extra"] == 1
+
+
+async def test_find_security_sends_optional_scope_and_preserves_formula_details():
+    client = object.__new__(VikingClient)
+    client.request = AsyncMock(return_value={
+        "type": "robot.find_security",
+        "eid": "find-1",
+        "ts": 19,
+        "r": "p",
+        "data": {
+            "key": "BTC",
+            "portfolios": [{"r_id": "1", "p_id": "arb", "disabled": False}],
+            "formulas": [{
+                "r_id": "1", "p_id": "arb", "pos": 4, "text": "BTC",
+                "sec": "", "title": "Field", "field": "uf1",
+                "value": "BTC", "disabled": False,
+            }],
+        },
+    })
+
+    result = await client.find_security(
+        security_key="BTC", robot_id="1", portfolio="arb"
+    )
+
+    client.request.assert_awaited_once_with(
+        "robot.find_security", {"key": "BTC", "r_id": "1", "p_id": "arb"}
+    )
+    assert result["portfolio_count"] == 1
+    assert result["formula_match_count"] == 1
+    assert result["formulas"][0]["field"] == "uf1"
