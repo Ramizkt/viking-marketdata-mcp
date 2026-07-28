@@ -2,7 +2,7 @@
 
 Публичный read-only MCP-сервер поверх WebSocket API `bot.fkviking.com`.
 
-Он предоставляет 22 инструмента:
+Он предоставляет 39 инструментов:
 
 - `list_available_portfolios` — доступные пользователю портфели;
 - `subscribe_available_portfolios` — подписка на изменения списка портфелей;
@@ -26,16 +26,46 @@
 - `get_previous_portfolio_deals` — до 100 сделок старше указанной даты;
 - `get_portfolio_deal_sec_keys` — уникальные инструменты из истории сделок;
 - `get_portfolio_deal_history` — история сделок за период с фильтром по инструменту;
-
-В ответах со сделками поле `aggr=false` означает обычную биржевую сделку.
-`aggr=true` означает синтетическую запись, агрегированную из одной или нескольких
-последовательно прошедших сделок по цене исходной заявки. Поэтому `price` у
-такой записи — цена заявки, а не фактическая цена отдельного исполнения. Это
-может происходить, когда ответ биржи по заявке приходит раньше события сделки.
+- `subscribe_data_connections`, `get_data_connection_updates`,
+  `unsubscribe_data_connections` — статусы market-data подключений;
+- `get_all_data_connections` — полный список market-data подключений робота;
+- `get_transaction_connection` — параметры transactional connection;
+- `get_transaction_connection_used_securities` — инструменты портфелей,
+  относящиеся к выбранному transactional connection;
+- `subscribe_transaction_connections`, `get_transaction_connection_updates`,
+  `unsubscribe_transaction_connections` — статусы transactional connections;
+- `get_all_transaction_connections` — полный список transactional connections;
+- `subscribe_transaction_orders`, `get_transaction_order_updates`,
+  `unsubscribe_transaction_orders` — активные заявки подключения;
+- `subscribe_transaction_positions`, `get_transaction_position_updates`,
+  `unsubscribe_transaction_positions` — позиции подключения;
 - `get_portfolio_data` — история выбранного портфеля за период.
 
 Небольшой результат возвращается непосредственно в MCP. Большой результат
 сохраняется в CSV и возвращается временной подписанной ссылкой.
+
+### Подключения робота
+
+Список market-data подключений задаётся сервером и колокацией робота. MCP
+возвращает их как есть и не создаёт новые; пользователь может только включать
+или выключать существующие подключения вне текущего read-only MCP. Некоторые
+источники используются парой: например, Definitions вместе с OrderBook или
+BestPrices.
+
+Transactional connections пользователь добавляет из доступных типов. Обычно
+присутствует хотя бы `0_virtual`. Перед подпиской на активные заявки проверяйте
+`can_check_pos=true`, перед подпиской на позиции — `has_pos=true`: не все
+подключения передают эти данные.
+
+Для подписок на статусы, заявки и позиции сохраняйте `subscription_id`, читайте
+события отдельным `get_*_updates` и обязательно вызывайте соответствующий
+`unsubscribe_*`. Viking может в любой момент прислать не только update
+`r="u"`, но и новый полный snapshot `r="s"`.
+
+Для списка инструментов используется wire-type
+`trans_conn.get_used_secs`. В таблице запроса официального `api.md` ошибочно
+указан `trans_conn.get`; пример и ответы подтверждают
+`trans_conn.get_used_secs`.
 
 ## Подключение
 
