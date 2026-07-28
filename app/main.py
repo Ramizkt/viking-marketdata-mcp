@@ -1063,6 +1063,90 @@ async def unsubscribe_transaction_positions(
         "Подписка на позиции завершена.",
     )
 
+@mcp.tool(
+    title="Инструменты робота",
+    description=(
+        "Возвращает полный список финансовых инструментов, доступных в выбранном роботе. "
+        "reload=true принудительно перечитывает список из робота вместо backend-кэша; "
+        "sec_type — необязательная числовая битовая маска типов инструментов. "
+        "Автоматически собирает все страницы ответа data.next."
+    ),
+    annotations=READ_ONLY,
+)
+async def get_robot_securities(
+    robot_id: Annotated[str, Field(min_length=1)],
+    reload: bool = False,
+    sec_type: Annotated[int | None, Field(ge=0)] = None,
+) -> CallToolResult:
+    result = await _service_for_request().get_robot_securities(
+        robot_id=robot_id, reload=reload, sec_type=sec_type
+    )
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=f"Финансовых инструментов: {result['security_count']}.",
+            )
+        ],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Клиентские коды робота",
+    description=(
+        "Возвращает доступные в роботе клиентские коды. Каждая запись содержит sec_type "
+        "и ll — уникальную метку клиентского кода, которую следует сопоставлять с "
+        "транзакционным подключением и инструментом."
+    ),
+    annotations=READ_ONLY,
+)
+async def get_robot_client_codes(
+    robot_id: Annotated[str, Field(min_length=1)],
+) -> CallToolResult:
+    result = await _service_for_request().get_robot_client_codes(robot_id=robot_id)
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=f"Клиентских кодов: {result['client_code_count']}.",
+            )
+        ],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Найти финансовый инструмент",
+    description=(
+        "Ищет точный SecKey в портфеле, одном роботе или во всех доступных роботах. "
+        "security_key обязателен; robot_id и portfolio необязательны и сужают область. "
+        "Возвращает портфели, где инструмент установлен, и точные вхождения в формулах "
+        "с полем, позицией, текстом и признаком disabled."
+    ),
+    annotations=READ_ONLY,
+)
+async def find_security(
+    security_key: Annotated[str, Field(min_length=1)],
+    robot_id: Annotated[str | None, Field(min_length=1)] = None,
+    portfolio: Annotated[str | None, Field(min_length=1)] = None,
+) -> CallToolResult:
+    result = await _service_for_request().find_security(
+        security_key=security_key, robot_id=robot_id, portfolio=portfolio
+    )
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=(
+                    f"Найдено портфелей: {result['portfolio_count']}; "
+                    f"вхождений в формулах: {result['formula_match_count']}."
+                ),
+            )
+        ],
+        structuredContent=result,
+    )
+
 
 @mcp.tool(
     title="История портфеля",
