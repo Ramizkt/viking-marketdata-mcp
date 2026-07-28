@@ -936,6 +936,358 @@ class VikingClient:
             security_key=security_key, limit=limit
         )
 
+    async def subscribe_data_connections(self, *, robot_id: str) -> dict[str, Any]:
+        return await self._subscribe_connection_feed(
+            "data_conn.subscribe", robot_id=robot_id, connection=None
+        )
+
+    async def get_data_connection_updates(
+        self, subscription_id: str, *, wait_seconds: float = 0, max_events: int = 100
+    ) -> dict[str, Any]:
+        return await self._get_connection_feed_updates(
+            subscription_id,
+            expected_type="data_conn.subscribe",
+            wait_seconds=wait_seconds,
+            max_events=max_events,
+        )
+
+    async def unsubscribe_data_connections(self, subscription_id: str) -> dict[str, Any]:
+        return await self._unsubscribe_log_subscription(
+            subscription_id,
+            expected_subscribe_type="data_conn.subscribe",
+            unsubscribe_type="data_conn.unsubscribe",
+        )
+
+    async def get_all_data_connections(self, *, robot_id: str) -> dict[str, Any]:
+        return await self._get_connection_list("data_conn.get_all", robot_id=robot_id)
+
+    async def get_transaction_connection(
+        self, *, robot_id: str, sec_type: int, name: str
+    ) -> dict[str, Any]:
+        self._validate_connection_identity(robot_id, sec_type, name)
+        response = await self.request(
+            "trans_conn.get",
+            {"r_id": robot_id, "conn": {"sec_type": sec_type, "name": name}},
+        )
+        parsed = self._parse_plain_response(response, "trans_conn.get")
+        data = parsed["data"]
+        returned_robot_id = self._required_str(data, "r_id")
+        connection = self._required_dict(data, "conn")
+        self._validate_returned_connection(
+            connection, expected_sec_type=sec_type, expected_name=name
+        )
+        if returned_robot_id != robot_id:
+            raise VikingProtocolError("Unexpected trans_conn.get r_id")
+        return {**parsed, "robot_id": robot_id, "connection": dict(connection)}
+
+    async def get_transaction_connection_used_securities(
+        self, *, robot_id: str, sec_type: int, name: str
+    ) -> dict[str, Any]:
+        """Use the real wire type; the API request table incorrectly says trans_conn.get."""
+        self._validate_connection_identity(robot_id, sec_type, name)
+        response = await self.request(
+            "trans_conn.get_used_secs",
+            {"r_id": robot_id, "conn": {"sec_type": sec_type, "name": name}},
+        )
+        parsed = self._parse_plain_response(response, "trans_conn.get_used_secs")
+        contracts = self._required_dict(parsed["data"], "contracts")
+        for key, contract in contracts.items():
+            if not isinstance(contract, dict):
+                raise VikingProtocolError(f"Contract {key!r} must be an object")
+            if self._required_str(contract, "sec_key") != key:
+                raise VikingProtocolError(f"Contract key {key!r} does not match sec_key")
+        return {
+            **parsed,
+            "robot_id": robot_id,
+            "connection": {"sec_type": sec_type, "name": name},
+            "contracts": {key: dict(value) for key, value in contracts.items()},
+            "security_count": len(contracts),
+        }
+
+    async def subscribe_transaction_connections(self, *, robot_id: str) -> dict[str, Any]:
+        return await self._subscribe_connection_feed(
+            "trans_conn.subscribe", robot_id=robot_id, connection=None
+        )
+
+    async def get_transaction_connection_updates(
+        self, subscription_id: str, *, wait_seconds: float = 0, max_events: int = 100
+    ) -> dict[str, Any]:
+        return await self._get_connection_feed_updates(
+            subscription_id,
+            expected_type="trans_conn.subscribe",
+            wait_seconds=wait_seconds,
+            max_events=max_events,
+        )
+
+    async def get_all_transaction_connections(self, *, robot_id: str) -> dict[str, Any]:
+        return await self._get_connection_list("trans_conn.get_all", robot_id=robot_id)
+
+    async def unsubscribe_transaction_connections(
+        self, subscription_id: str
+    ) -> dict[str, Any]:
+        return await self._unsubscribe_log_subscription(
+            subscription_id,
+            expected_subscribe_type="trans_conn.subscribe",
+            unsubscribe_type="trans_conn.unsubscribe",
+        )
+
+    async def subscribe_transaction_orders(
+        self, *, robot_id: str, sec_type: int, name: str
+    ) -> dict[str, Any]:
+        return await self._subscribe_connection_feed(
+            "trans_conn_orders.subscribe",
+            robot_id=robot_id,
+            connection={"sec_type": sec_type, "name": name},
+        )
+
+    async def get_transaction_order_updates(
+        self, subscription_id: str, *, wait_seconds: float = 0, max_events: int = 100
+    ) -> dict[str, Any]:
+        return await self._get_connection_feed_updates(
+            subscription_id,
+            expected_type="trans_conn_orders.subscribe",
+            wait_seconds=wait_seconds,
+            max_events=max_events,
+        )
+
+    async def unsubscribe_transaction_orders(self, subscription_id: str) -> dict[str, Any]:
+        return await self._unsubscribe_log_subscription(
+            subscription_id,
+            expected_subscribe_type="trans_conn_orders.subscribe",
+            unsubscribe_type="trans_conn_orders.unsubscribe",
+        )
+
+    async def subscribe_transaction_positions(
+        self, *, robot_id: str, sec_type: int, name: str
+    ) -> dict[str, Any]:
+        return await self._subscribe_connection_feed(
+            "trans_conn_poses.subscribe",
+            robot_id=robot_id,
+            connection={"sec_type": sec_type, "name": name},
+        )
+
+    async def get_transaction_position_updates(
+        self, subscription_id: str, *, wait_seconds: float = 0, max_events: int = 100
+    ) -> dict[str, Any]:
+        return await self._get_connection_feed_updates(
+            subscription_id,
+            expected_type="trans_conn_poses.subscribe",
+            wait_seconds=wait_seconds,
+            max_events=max_events,
+        )
+
+    async def unsubscribe_transaction_positions(
+        self, subscription_id: str
+    ) -> dict[str, Any]:
+        return await self._unsubscribe_log_subscription(
+            subscription_id,
+            expected_subscribe_type="trans_conn_poses.subscribe",
+            unsubscribe_type="trans_conn_poses.unsubscribe",
+        )
+
+    async def _get_connection_list(
+        self, message_type: str, *, robot_id: str
+    ) -> dict[str, Any]:
+        if not robot_id:
+            raise ValueError("robot_id must not be empty")
+        response = await self.request(message_type, {"r_id": robot_id})
+        parsed = self._parse_plain_response(response, message_type)
+        data = parsed["data"]
+        if self._required_str(data, "r_id") != robot_id:
+            raise VikingProtocolError(f"Unexpected {message_type} r_id")
+        values = self._required_dict(data, "values")
+        self._validate_connection_map(values)
+        return {
+            **parsed,
+            "robot_id": robot_id,
+            "connections": {key: dict(value) for key, value in values.items()},
+            "connection_count": len(values),
+        }
+
+    async def _subscribe_connection_feed(
+        self,
+        message_type: str,
+        *,
+        robot_id: str,
+        connection: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not robot_id:
+            raise ValueError("robot_id must not be empty")
+        data: dict[str, Any] = {"r_id": robot_id}
+        if connection is not None:
+            self._validate_connection_identity(
+                robot_id, connection.get("sec_type"), connection.get("name")
+            )
+            data["conn"] = connection
+        response = await self._subscribe(message_type, data)
+        subscription_id = self._required_str(response, "eid")
+        try:
+            event = self._parse_connection_event(
+                response,
+                expected_type=message_type,
+                subscription_id=subscription_id,
+                expected_robot_id=robot_id,
+                expected_connection=connection,
+            )
+            return {"subscription_id": subscription_id, "active": True, **event}
+        except BaseException:
+            self._subscriptions.pop(subscription_id, None)
+            await self.close()
+            raise
+
+    async def _get_connection_feed_updates(
+        self,
+        subscription_id: str,
+        *,
+        expected_type: str,
+        wait_seconds: float,
+        max_events: int,
+    ) -> dict[str, Any]:
+        subscription = self._subscriptions.get(subscription_id)
+        if subscription is None or subscription.message_type != expected_type:
+            raise ValueError(f"Unknown or inactive {expected_type} subscription_id")
+        if subscription.overflowed:
+            raise VikingProtocolError(
+                f"{expected_type} subscription buffer overflowed and events were lost"
+            )
+        if not 0 <= wait_seconds <= 30:
+            raise ValueError("wait_seconds must be in range 0..30")
+        if not 1 <= max_events <= 500:
+            raise ValueError("max_events must be in range 1..500")
+        request_data = subscription.request_data or {}
+        messages: list[dict[str, Any]] = []
+        if wait_seconds and subscription.queue.empty():
+            with contextlib.suppress(TimeoutError):
+                messages.append(
+                    await asyncio.wait_for(subscription.queue.get(), timeout=wait_seconds)
+                )
+        while len(messages) < max_events:
+            try:
+                messages.append(subscription.queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        events = []
+        for message in messages:
+            if message.get("r") == "e":
+                self._subscriptions.pop(subscription_id, None)
+                self._raise_api_error(message)
+            events.append(
+                self._parse_connection_event(
+                    message,
+                    expected_type=expected_type,
+                    subscription_id=subscription_id,
+                    expected_robot_id=self._required_str(request_data, "r_id"),
+                    expected_connection=request_data.get("conn"),
+                )
+            )
+        active = subscription_id in self._subscriptions
+        return {
+            "subscription_id": subscription_id,
+            "event_count": len(events),
+            "events": events,
+            "active": active,
+            "more_available": active and not subscription.queue.empty(),
+        }
+
+    @classmethod
+    def _parse_connection_event(
+        cls,
+        response: dict[str, Any],
+        *,
+        expected_type: str,
+        subscription_id: str,
+        expected_robot_id: str,
+        expected_connection: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        cls._validate_response_identity(
+            response, expected_type=expected_type, expected_eid=subscription_id
+        )
+        result = cls._required_str(response, "r")
+        if result not in {"s", "u"}:
+            raise VikingProtocolError(f"{expected_type} returned unexpected r={result!r}")
+        source_data = cls._required_dict(response, "data")
+        if cls._required_str(source_data, "r_id") != expected_robot_id:
+            raise VikingProtocolError(f"Unexpected {expected_type} r_id")
+        field = "value" if expected_connection is not None else "values"
+        value = cls._required_dict(source_data, field)
+        if expected_connection is None:
+            cls._validate_connection_map(value)
+        else:
+            cls._validate_returned_connection(
+                value,
+                expected_sec_type=expected_connection["sec_type"],
+                expected_name=expected_connection["name"],
+            )
+        data = dict(source_data)
+        data[field] = dict(value)
+        return {
+            "type": expected_type,
+            "eid": subscription_id,
+            "ts": cls._required_int(response, "ts"),
+            "r": result,
+            "result": result,
+            "data": data,
+            "robot_id": expected_robot_id,
+            field: data[field],
+        }
+
+    @classmethod
+    def _parse_plain_response(
+        cls, response: dict[str, Any], expected_type: str
+    ) -> dict[str, Any]:
+        cls._validate_response_identity(response, expected_type=expected_type)
+        result = cls._required_str(response, "r")
+        if result != "p":
+            raise VikingProtocolError(
+                f"{expected_type} returned an unexpected result; expected r='p'"
+            )
+        return {
+            "type": expected_type,
+            "eid": cls._required_str(response, "eid"),
+            "ts": cls._required_int(response, "ts"),
+            "r": result,
+            "result": result,
+            "data": dict(cls._required_dict(response, "data")),
+        }
+
+    @classmethod
+    def _validate_connection_map(cls, values: dict[str, Any]) -> None:
+        for key, connection in values.items():
+            if not isinstance(connection, dict):
+                raise VikingProtocolError(f"Connection {key!r} must be an object")
+            sec_type = connection.get("sec_type")
+            name = connection.get("name")
+            cls._validate_returned_connection(
+                connection, expected_sec_type=sec_type, expected_name=name
+            )
+            if key != f"{sec_type}_{name}":
+                raise VikingProtocolError(
+                    f"Connection key {key!r} does not match sec_type + '_' + name"
+                )
+
+    @classmethod
+    def _validate_returned_connection(
+        cls, connection: dict[str, Any], *, expected_sec_type: Any, expected_name: Any
+    ) -> None:
+        sec_type = connection.get("sec_type")
+        if isinstance(sec_type, bool) or not isinstance(sec_type, int):
+            raise VikingProtocolError("Connection sec_type must be an integer")
+        name = cls._required_str(connection, "name")
+        if sec_type != expected_sec_type or name != expected_name:
+            raise VikingProtocolError("Unexpected connection identity")
+        action = connection.get("__action")
+        if action is not None and action != "del":
+            raise VikingProtocolError("Connection __action must be 'del' when present")
+
+    @staticmethod
+    def _validate_connection_identity(robot_id: str, sec_type: Any, name: Any) -> None:
+        if not robot_id:
+            raise ValueError("robot_id must not be empty")
+        if isinstance(sec_type, bool) or not isinstance(sec_type, int) or sec_type < 0:
+            raise ValueError("sec_type must be a non-negative integer")
+        if not isinstance(name, str) or not name:
+            raise ValueError("name must not be empty")
+
     async def _get_portfolio_deals_response(
         self,
         message_type: str,
