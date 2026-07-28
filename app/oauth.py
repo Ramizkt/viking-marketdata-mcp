@@ -63,6 +63,14 @@ class SessionToken:
     last_used: float
 
 
+@dataclass
+class SessionRefreshToken:
+    refresh: RefreshToken
+    credentials: VikingCredentials
+    resource: str | None
+    absolute_expires_at: int
+
+
 class RecoverableOAuthClient(OAuthClientInformationFull):
     """Temporary public client used to migrate registrations lost before persistence."""
 
@@ -96,6 +104,7 @@ class VikingOAuthProvider(
         self._pending: dict[str, PendingAuthorization] = {}
         self._codes: dict[str, VikingAuthorizationCode] = {}
         self._session_tokens: dict[str, SessionToken] = {}
+        self._session_refresh_tokens: dict[str, SessionRefreshToken] = {}
         self._cleanup_task: asyncio.Task[None] | None = None
 
         secret = settings.credential_token_key or settings.export_signing_key
@@ -120,6 +129,7 @@ class VikingOAuthProvider(
         self._pending.clear()
         self._codes.clear()
         self._session_tokens.clear()
+        self._session_refresh_tokens.clear()
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         client = self._clients.get(client_id)
@@ -203,33 +213,24 @@ class VikingOAuthProvider(
         subject = self._subject(stored.credentials)
 
         if stored.mode == "session":
-            ttl = self.settings.oauth_session_max_ttl_seconds
-            token = f"s1_{secrets.token_urlsafe(36)}"
-            access = AccessToken(
-                token=token,
-                client_id=stored.client_id,
-                scopes=scopes,
-                expires_at=now + ttl,
-                resource=stored.resource,
-                subject=subject,
-                claims={"iss": self.base_url, "credential_mode": "session"},
-            )
-            self._session_tokens[token] = SessionToken(
-                access=access,
-                credentials=stored.credentials,
-                last_used=time.monotonic(),
-            )
-        else:
-            ttl = self.settings.oauth_persistent_token_ttl_seconds
-            token = self._encrypt_token(
+            return self._issue_session_tokens(
                 credentials=stored.credentials,
                 client_id=stored.client_id,
                 scopes=scopes,
                 resource=stored.resource,
                 subject=subject,
-                expires_at=now + ttl,
+                absolute_expires_at=now + self.settings.oauth_session_max_ttl_seconds,
             )
 
+        ttl = self.settings.oauth_persistent_token_ttl_seconds
+        token = self._encrypt_token(
+            credentials=stored.credentials,
+            client_id=stored.client_id,
+            scopes=scopes,
+            resource=stored.resource,
+            subject=subject,
+            expires_at=now + ttl,
+        )
         return OAuthToken(
             access_token=token,
             token_type="Bearer",
@@ -242,7 +243,13 @@ class VikingOAuthProvider(
         client: OAuthClientInformationFull,
         refresh_token: str,
     ) -> RefreshToken | None:
-        return None
+        stored = self._session_refresh_tokens.get(refresh_token)
+        if stored is None or stored.refresh.client_id != client.client_id:
+            return None
+        if stored.refresh.expires_at is not None and stored.refresh.expires_at <= int(time.time()):
+            self._session_refresh_tokens.pop(refresh_token, None)
+            return None
+        return stored.refresh
 
     async def exchange_refresh_token(
         self,
@@ -250,7 +257,29 @@ class VikingOAuthProvider(
         refresh_token: RefreshToken,
         scopes: list[str],
     ) -> OAuthToken:
-        raise TokenError("invalid_grant", "refresh tokens are not issued")
+        stored = self._session_refresh_tokens.pop(refresh_token.token, None)
+        now = int(time.time())
+        if (
+            stored is None
+            or stored.refresh.client_id != client.client_id
+            or stored.refresh.expires_at is None
+            or stored.refresh.expires_at <= now
+            or stored.absolute_expires_at <= now
+        ):
+            raise TokenError("invalid_grant", "refresh token is invalid or expired")
+
+        requested_scopes = scopes or stored.refresh.scopes
+        if not set(requested_scopes).issubset(stored.refresh.scopes):
+            raise TokenError("invalid_scope", "requested scope exceeds the original grant")
+
+        return self._issue_session_tokens(
+            credentials=stored.credentials,
+            client_id=stored.refresh.client_id,
+            scopes=requested_scopes,
+            resource=stored.resource,
+            subject=stored.refresh.subject or self._subject(stored.credentials),
+            absolute_expires_at=stored.absolute_expires_at,
+        )
 
     async def load_access_token(self, token: str) -> AccessToken | None:
         if token.startswith("s1_"):
@@ -288,6 +317,7 @@ class VikingOAuthProvider(
 
     async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
         self._session_tokens.pop(token.token, None)
+        self._session_refresh_tokens.pop(token.token, None)
 
     def credentials_for_access_token(self, token: str) -> VikingCredentials | None:
         if token.startswith("s1_"):
@@ -405,8 +435,71 @@ class VikingOAuthProvider(
                     if (value.access.expires_at is None or value.access.expires_at > now)
                     and monotonic_now - value.last_used <= self.settings.oauth_session_idle_ttl_seconds
                 }
+                self._session_refresh_tokens = {
+                    key: value
+                    for key, value in self._session_refresh_tokens.items()
+                    if value.refresh.expires_at is not None
+                    and value.refresh.expires_at > now
+                    and value.absolute_expires_at > now
+                }
         except asyncio.CancelledError:
             raise
+
+    def _issue_session_tokens(
+        self,
+        *,
+        credentials: VikingCredentials,
+        client_id: str,
+        scopes: list[str],
+        resource: str | None,
+        subject: str,
+        absolute_expires_at: int,
+    ) -> OAuthToken:
+        now = int(time.time())
+        expires_at = min(
+            now + self.settings.oauth_session_idle_ttl_seconds,
+            absolute_expires_at,
+        )
+        if expires_at <= now:
+            raise TokenError("invalid_grant", "OAuth session reached its maximum lifetime")
+
+        access_token = f"s1_{secrets.token_urlsafe(36)}"
+        access = AccessToken(
+            token=access_token,
+            client_id=client_id,
+            scopes=scopes,
+            expires_at=expires_at,
+            resource=resource,
+            subject=subject,
+            claims={"iss": self.base_url, "credential_mode": "session"},
+        )
+        self._session_tokens[access_token] = SessionToken(
+            access=access,
+            credentials=credentials,
+            last_used=time.monotonic(),
+        )
+
+        refresh_value = f"sr1_{secrets.token_urlsafe(36)}"
+        refresh = RefreshToken(
+            token=refresh_value,
+            client_id=client_id,
+            scopes=scopes,
+            expires_at=expires_at,
+            subject=subject,
+        )
+        self._session_refresh_tokens[refresh_value] = SessionRefreshToken(
+            refresh=refresh,
+            credentials=credentials,
+            resource=resource,
+            absolute_expires_at=absolute_expires_at,
+        )
+        return OAuthToken(
+            access_token=access_token,
+            token_type="Bearer",
+            expires_in=expires_at - now,
+            scope=" ".join(scopes),
+            refresh_token=refresh_value,
+        )
 
     async def _persist_client(self, client_info: OAuthClientInformationFull) -> None:
         if not client_info.client_id:
