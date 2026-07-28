@@ -264,6 +264,92 @@ class MarketDataService:
             "date_to": date_to.astimezone(UTC).isoformat(),
         }
 
+    async def subscribe_data_connections(self, *, robot_id: str) -> dict[str, Any]:
+        return await self.client.subscribe_data_connections(robot_id=robot_id)
+
+    async def get_data_connection_updates(
+        self, *, subscription_id: str, wait_seconds: float, max_events: int
+    ) -> dict[str, Any]:
+        return await self.client.get_data_connection_updates(
+            subscription_id, wait_seconds=wait_seconds, max_events=max_events
+        )
+
+    async def get_all_data_connections(self, *, robot_id: str) -> dict[str, Any]:
+        return await self.client.get_all_data_connections(robot_id=robot_id)
+
+    async def unsubscribe_data_connections(self, *, subscription_id: str) -> dict[str, Any]:
+        return await self.client.unsubscribe_data_connections(subscription_id)
+
+    async def get_transaction_connection(
+        self, *, robot_id: str, sec_type: int, name: str
+    ) -> dict[str, Any]:
+        return await self.client.get_transaction_connection(
+            robot_id=robot_id, sec_type=sec_type, name=name
+        )
+
+    async def get_transaction_connection_used_securities(
+        self, *, robot_id: str, sec_type: int, name: str
+    ) -> dict[str, Any]:
+        return await self.client.get_transaction_connection_used_securities(
+            robot_id=robot_id, sec_type=sec_type, name=name
+        )
+
+    async def subscribe_transaction_connections(self, *, robot_id: str) -> dict[str, Any]:
+        return await self.client.subscribe_transaction_connections(robot_id=robot_id)
+
+    async def get_transaction_connection_updates(
+        self, *, subscription_id: str, wait_seconds: float, max_events: int
+    ) -> dict[str, Any]:
+        return await self.client.get_transaction_connection_updates(
+            subscription_id, wait_seconds=wait_seconds, max_events=max_events
+        )
+
+    async def get_all_transaction_connections(self, *, robot_id: str) -> dict[str, Any]:
+        return await self.client.get_all_transaction_connections(robot_id=robot_id)
+
+    async def unsubscribe_transaction_connections(
+        self, *, subscription_id: str
+    ) -> dict[str, Any]:
+        return await self.client.unsubscribe_transaction_connections(subscription_id)
+
+    async def subscribe_transaction_orders(
+        self, *, robot_id: str, sec_type: int, name: str
+    ) -> dict[str, Any]:
+        return await self.client.subscribe_transaction_orders(
+            robot_id=robot_id, sec_type=sec_type, name=name
+        )
+
+    async def get_transaction_order_updates(
+        self, *, subscription_id: str, wait_seconds: float, max_events: int
+    ) -> dict[str, Any]:
+        return await self.client.get_transaction_order_updates(
+            subscription_id, wait_seconds=wait_seconds, max_events=max_events
+        )
+
+    async def unsubscribe_transaction_orders(
+        self, *, subscription_id: str
+    ) -> dict[str, Any]:
+        return await self.client.unsubscribe_transaction_orders(subscription_id)
+
+    async def subscribe_transaction_positions(
+        self, *, robot_id: str, sec_type: int, name: str
+    ) -> dict[str, Any]:
+        return await self.client.subscribe_transaction_positions(
+            robot_id=robot_id, sec_type=sec_type, name=name
+        )
+
+    async def get_transaction_position_updates(
+        self, *, subscription_id: str, wait_seconds: float, max_events: int
+    ) -> dict[str, Any]:
+        return await self.client.get_transaction_position_updates(
+            subscription_id, wait_seconds=wait_seconds, max_events=max_events
+        )
+
+    async def unsubscribe_transaction_positions(
+        self, *, subscription_id: str
+    ) -> dict[str, Any]:
+        return await self.client.unsubscribe_transaction_positions(subscription_id)
+
     async def get_portfolio_data(
         self,
         *,
