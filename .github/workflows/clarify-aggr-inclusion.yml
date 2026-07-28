@@ -1,9 +1,9 @@
 name: Apply aggregated deal guidance
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/clarify-aggr-inclusion
+      - main
 
 permissions:
   contents: write
