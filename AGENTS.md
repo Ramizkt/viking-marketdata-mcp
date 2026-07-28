@@ -23,7 +23,7 @@ Production MCP:
 - health: `https://viking-marketdata-mcp-production.up.railway.app/health`;
 - setup: `https://viking-marketdata-mcp-production.up.railway.app/setup`.
 
-В актуальной версии реализованы 39 MCP-инструментов. Сервер
+В актуальной версии реализованы 42 MCP-инструмента. Сервер
 только читает данные: он не создаёт и не изменяет портфели, не меняет поля, не
 отправляет торговые сигналы и заявки.
 
@@ -191,7 +191,7 @@ Viking credentials в Railway environment и не возвращайте ста�
 
 ## 6. Реально используемые методы Viking WebSocket API
 
-Сейчас реализовано 32 типа операций Viking:
+Сейчас реализовано 35 типов операций Viking:
 
 | Viking API `type` | Назначение | Где используется |
 |---|---|---|
@@ -225,6 +225,9 @@ Viking credentials в Railway environment и не возвращайте ста�
 | `trans_conn_orders.unsubscribe` | Завершение подписки на заявки | `unsubscribe_transaction_orders` |
 | `trans_conn_poses.subscribe` | Snapshot и обновления позиций | subscribe/get transaction position updates |
 | `trans_conn_poses.unsubscribe` | Завершение подписки на позиции | `unsubscribe_transaction_positions` |
+| `robot.get_securities` | Полный, возможно многостраничный список инструментов робота | `get_robot_securities` |
+| `robot.get_client_codes` | Клиентские коды робота с `sec_type` и `ll` | `get_robot_client_codes` |
+| `robot.find_security` | Поиск SecKey в портфелях и формулах | `find_security` |
 | `portfolio_history.get_history` | Первая порция истории поля в диапазоне | `get_portfolio_data` |
 | `portfolio_history.get_previous` | Пагинация к более ранним точкам | `get_portfolio_data` |
 
@@ -238,6 +241,20 @@ Viking credentials в Railway environment и не возвращайте ста�
 
 Повреждённый ответ, несовпадение `eid`, `r_id`/`p_id`, неожиданный `r`, потеря
 соединения или переполнение очереди не должны превращаться в успешный результат.
+
+Особенности методов инструментов:
+
+- `robot.get_securities` может вернуть несколько `r="p"` с одним `eid`;
+  `data.next=true` означает, что нужно дождаться следующего сообщения, а не
+  завершать вызов. Объединяйте страницы по ключу `SEC_KEY` и проверяйте его
+  равенство внутреннему `sec_key`;
+- `reload=false` использует backend-кэш, `reload=true` запрашивает данные заново
+  из робота; `sec_type` является необязательной числовой битовой маской;
+- у `robot.get_client_codes` ответ `values` — массив объектов
+  `{sec_type, ll}`, несмотря на промежуточную строку `object` в таблице;
+- `robot.find_security` требует `key`, а необязательные `r_id` и `p_id` сужают
+  область. Возвращайте без потерь и `portfolios`, и `formulas`: последние
+  содержат точное место вхождения SecKey в поле или формулу.
 После потери соединения активная подписка не восстанавливается молча: создайте
 новую.
 
