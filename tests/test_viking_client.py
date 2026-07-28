@@ -1241,3 +1241,166 @@ async def test_portfolio_deals_unsubscribe_uses_subscription_eid():
         "portfolio_deals.unsubscribe", {"sub_eid": "deals-sub-1"}
     )
     assert result["unsubscribed"] is True
+
+
+async def test_get_used_securities_uses_real_wire_type_despite_api_table_typo():
+    client = object.__new__(VikingClient)
+    client.request = AsyncMock(return_value={
+        "type": "trans_conn.get_used_secs",
+        "eid": "request-1",
+        "ts": 10,
+        "r": "p",
+        "data": {
+            "contracts": {
+                "VT_BTCUSD": {
+                    "sec_key": "VT_BTCUSD",
+                    "step": 0.5,
+                    "sec_key_subscr": "1",
+                    "sec_code": "BTC/USD",
+                    "coin": "",
+                    "bid": 35000,
+                    "offer": 36000,
+                    "decimals": 1,
+                }
+            }
+        },
+    })
+
+    result = await client.get_transaction_connection_used_securities(
+        robot_id="1", sec_type=67108864, name="aws"
+    )
+
+    client.request.assert_awaited_once_with(
+        "trans_conn.get_used_secs",
+        {"r_id": "1", "conn": {"sec_type": 67108864, "name": "aws"}},
+    )
+    assert result["security_count"] == 1
+
+
+async def test_data_connection_list_preserves_server_defined_fields():
+    client = object.__new__(VikingClient)
+    client.request = AsyncMock(return_value={
+        "type": "data_conn.get_all",
+        "eid": "request-2",
+        "ts": 11,
+        "r": "p",
+        "data": {
+            "r_id": "1",
+            "values": {
+                "3_FAST BestPrices": {
+                    "sec_type": 3,
+                    "name": "FAST BestPrices",
+                    "disabled": False,
+                    "stream_state": {"BestPrices": 2},
+                    "custom": {"kept": True},
+                }
+            },
+        },
+    })
+
+    result = await client.get_all_data_connections(robot_id="1")
+
+    client.request.assert_awaited_once_with("data_conn.get_all", {"r_id": "1"})
+    assert result["connection_count"] == 1
+    assert result["connections"]["3_FAST BestPrices"]["custom"] == {"kept": True}
+
+
+async def test_transaction_order_subscription_uses_connection_pair_and_parses_delete():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {}
+    client.close = AsyncMock()
+    client._subscribe = AsyncMock(return_value={
+        "type": "trans_conn_orders.subscribe",
+        "eid": "orders-sub-1",
+        "ts": 12,
+        "r": "s",
+        "data": {
+            "r_id": "1",
+            "value": {
+                "sec_type": 1048576,
+                "name": "roma",
+                "full_name": "bitmex_send_roma",
+                "disabled": False,
+                "active_orders": {},
+            },
+        },
+    })
+
+    result = await client.subscribe_transaction_orders(
+        robot_id="1", sec_type=1048576, name="roma"
+    )
+
+    client._subscribe.assert_awaited_once_with(
+        "trans_conn_orders.subscribe",
+        {"r_id": "1", "conn": {"sec_type": 1048576, "name": "roma"}},
+    )
+    assert result["active"] is True
+    assert result["value"]["active_orders"] == {}
+
+
+async def test_connection_subscription_accepts_repeated_snapshot_and_update():
+    client = object.__new__(VikingClient)
+    queue = asyncio.Queue()
+    await queue.put({
+        "type": "trans_conn.subscribe",
+        "eid": "conn-sub-1",
+        "ts": 13,
+        "r": "u",
+        "data": {
+            "r_id": "1",
+            "values": {
+                "0_virtual": {
+                    "sec_type": 0,
+                    "name": "virtual",
+                    "stream_state": {"TRANS": 2},
+                }
+            },
+        },
+    })
+    await queue.put({
+        "type": "trans_conn.subscribe",
+        "eid": "conn-sub-1",
+        "ts": 14,
+        "r": "s",
+        "data": {
+            "r_id": "1",
+            "values": {
+                "0_virtual": {
+                    "sec_type": 0,
+                    "name": "virtual",
+                    "disabled": False,
+                }
+            },
+        },
+    })
+    client._subscriptions = {
+        "conn-sub-1": _Subscription(
+            "trans_conn.subscribe", queue, request_data={"r_id": "1"}
+        )
+    }
+
+    result = await client.get_transaction_connection_updates("conn-sub-1")
+
+    assert [event["r"] for event in result["events"]] == ["u", "s"]
+    assert result["event_count"] == 2
+
+
+async def test_connection_unsubscribe_uses_subscription_eid():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {
+        "poses-sub-1": _Subscription("trans_conn_poses.subscribe", asyncio.Queue())
+    }
+    client.request = AsyncMock(return_value={
+        "type": "trans_conn_poses.unsubscribe",
+        "eid": "request-3",
+        "ts": 15,
+        "r": "p",
+        "data": {},
+    })
+
+    result = await client.unsubscribe_transaction_positions("poses-sub-1")
+
+    client.request.assert_awaited_once_with(
+        "trans_conn_poses.unsubscribe", {"sub_eid": "poses-sub-1"}
+    )
+    assert result["unsubscribed"] is True
