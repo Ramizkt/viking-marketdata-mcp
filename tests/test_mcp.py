@@ -46,6 +46,9 @@ async def test_mcp_lists_expected_tools():
         "subscribe_transaction_positions",
         "get_transaction_position_updates",
         "unsubscribe_transaction_positions",
+        "get_robot_securities",
+        "get_robot_client_codes",
+        "find_security",
         "get_portfolio_data",
     }
     assert tools["subscribe_available_portfolios"].annotations.idempotentHint is False
