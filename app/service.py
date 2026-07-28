@@ -350,6 +350,29 @@ class MarketDataService:
     ) -> dict[str, Any]:
         return await self.client.unsubscribe_transaction_positions(subscription_id)
 
+    async def get_robot_securities(
+        self, *, robot_id: str, reload: bool, sec_type: int | None
+    ) -> dict[str, Any]:
+        return await self.client.get_robot_securities(
+            robot_id=robot_id, reload=reload, sec_type=sec_type
+        )
+
+    async def get_robot_client_codes(self, *, robot_id: str) -> dict[str, Any]:
+        return await self.client.get_robot_client_codes(robot_id=robot_id)
+
+    async def find_security(
+        self,
+        *,
+        security_key: str,
+        robot_id: str | None,
+        portfolio: str | None,
+    ) -> dict[str, Any]:
+        return await self.client.find_security(
+            security_key=security_key,
+            robot_id=robot_id,
+            portfolio=portfolio,
+        )
+
     async def get_portfolio_data(
         self,
         *,
