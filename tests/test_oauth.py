@@ -116,13 +116,66 @@ async def test_session_mode_keeps_credentials_only_in_memory(monkeypatch, tmp_pa
 
     token = await provider.exchange_authorization_code(client, authorization_code)
     assert token.access_token.startswith("s1_")
+    assert token.refresh_token is not None
+    assert token.refresh_token.startswith("sr1_")
+    assert token.expires_in == provider.settings.oauth_session_idle_ttl_seconds
     assert "viking-secret" not in token.access_token
+    assert "viking-secret" not in token.refresh_token
     assert provider.credentials_for_access_token(token.access_token).api_key == "viking-secret"
 
     stored = provider._session_tokens[token.access_token]
     stored.last_used -= provider.settings.oauth_session_idle_ttl_seconds + 1
     assert await provider.load_access_token(token.access_token) is None
     assert provider.credentials_for_access_token(token.access_token) is None
+
+
+async def test_session_refresh_rotates_tokens_without_persisting_credentials(
+    monkeypatch,
+    tmp_path,
+):
+    provider = VikingOAuthProvider(_settings(tmp_path))
+    client, authorization_code = await _authorize_and_submit(
+        provider,
+        mode="session",
+        monkeypatch=monkeypatch,
+    )
+    original = await provider.exchange_authorization_code(client, authorization_code)
+
+    refresh = await provider.load_refresh_token(client, original.refresh_token)
+    assert refresh is not None
+    refreshed = await provider.exchange_refresh_token(client, refresh, [OAUTH_SCOPE])
+
+    assert refreshed.access_token != original.access_token
+    assert refreshed.refresh_token != original.refresh_token
+    assert await provider.load_refresh_token(client, original.refresh_token) is None
+    assert await provider.load_access_token(refreshed.access_token) is not None
+    assert provider.credentials_for_access_token(refreshed.access_token).api_key == "viking-secret"
+    assert settings_file_contents(tmp_path) == ""
+
+
+async def test_session_refresh_is_rejected_after_server_restart(monkeypatch, tmp_path):
+    settings = _settings(tmp_path)
+    provider = VikingOAuthProvider(settings)
+    client, authorization_code = await _authorize_and_submit(
+        provider,
+        mode="session",
+        monkeypatch=monkeypatch,
+    )
+    token = await provider.exchange_authorization_code(client, authorization_code)
+
+    restarted = VikingOAuthProvider(settings)
+    restored_client = await restarted.get_client(client.client_id)
+    assert restored_client is not None
+    assert await restarted.load_refresh_token(restored_client, token.refresh_token) is None
+
+
+def settings_file_contents(tmp_path: Path) -> str:
+    credential_files = [
+        path
+        for path in tmp_path.iterdir()
+        if path.name != "oauth-clients.json"
+    ]
+    return "".join(path.read_text(encoding="utf-8") for path in credential_files)
 
 
 async def test_local_mode_uses_self_contained_encrypted_token(monkeypatch, tmp_path):
