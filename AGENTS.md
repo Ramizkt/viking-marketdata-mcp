@@ -23,7 +23,7 @@ Production MCP:
 - health: `https://viking-marketdata-mcp-production.up.railway.app/health`;
 - setup: `https://viking-marketdata-mcp-production.up.railway.app/setup`.
 
-В актуальной версии реализованы 17 MCP-инструментов. Сервер
+В актуальной версии реализованы 39 MCP-инструментов. Сервер
 только читает данные: он не создаёт и не изменяет портфели, не меняет поля, не
 отправляет торговые сигналы и заявки.
 
@@ -191,7 +191,7 @@ Viking credentials в Railway environment и не возвращайте ста�
 
 ## 6. Реально используемые методы Viking WebSocket API
 
-Сейчас реализовано 20 типов операций Viking:
+Сейчас реализовано 32 типа операций Viking:
 
 | Viking API `type` | Назначение | Где используется |
 |---|---|---|
@@ -213,6 +213,18 @@ Viking credentials в Railway environment и не возвращайте ста�
 | `portfolio_deals.get_previous` | До 100 сделок старше `mt` | `get_previous_portfolio_deals` |
 | `portfolio_deals.get_sec_keys` | Уникальные инструменты в истории сделок | `get_portfolio_deal_sec_keys` |
 | `portfolio_deals.get_history` | Сделки во включительном диапазоне `epoch_nsec` | `get_portfolio_deal_history` |
+| `data_conn.subscribe` | Snapshot и обновления market-data подключений | subscribe/get data connection updates |
+| `data_conn.get_all` | Список market-data подключений робота | `get_all_data_connections` |
+| `data_conn.unsubscribe` | Завершение подписки на market-data подключения | `unsubscribe_data_connections` |
+| `trans_conn.get` | Параметры transactional connection | `get_transaction_connection` |
+| `trans_conn.get_used_secs` | Инструменты портфелей с client code подключения | `get_transaction_connection_used_securities` |
+| `trans_conn.subscribe` | Snapshot и обновления transactional connections | subscribe/get transaction connection updates |
+| `trans_conn.get_all` | Список transactional connections | `get_all_transaction_connections` |
+| `trans_conn.unsubscribe` | Завершение подписки на transactional connections | `unsubscribe_transaction_connections` |
+| `trans_conn_orders.subscribe` | Snapshot и обновления активных заявок | subscribe/get transaction order updates |
+| `trans_conn_orders.unsubscribe` | Завершение подписки на заявки | `unsubscribe_transaction_orders` |
+| `trans_conn_poses.subscribe` | Snapshot и обновления позиций | subscribe/get transaction position updates |
+| `trans_conn_poses.unsubscribe` | Завершение подписки на позиции | `unsubscribe_transaction_positions` |
 | `portfolio_history.get_history` | Первая порция истории поля в диапазоне | `get_portfolio_data` |
 | `portfolio_history.get_previous` | Пагинация к более ранним точкам | `get_portfolio_data` |
 
@@ -228,6 +240,13 @@ Viking credentials в Railway environment и не возвращайте ста�
 соединения или переполнение очереди не должны превращаться в успешный результат.
 После потери соединения активная подписка не восстанавливается молча: создайте
 новую.
+
+В официальном `api.md` есть две опечатки, которые нельзя переносить в код:
+
+- таблица запроса `trans_conn.get_used_secs` ошибочно пишет `trans_conn.get`;
+  wire-type подтверждён примером и ответами как `trans_conn.get_used_secs`;
+- раздел ошибки `trans_conn.subscribe` ошибочно пишет `trans_conn.get_all`;
+  подписка использует `trans_conn.subscribe`.
 
 ## 7. Реально доступные MCP-инструменты
 
@@ -401,19 +420,23 @@ update в официальной документации их не содерж
 или integer: таблица описывает string, а официальный snapshot example содержит
 number. Фильтр `security_key` передаётся в Viking как `sec_key`.
 
-Поле `aggr` в фактических ответах имеет специальный смысл, хотя во вложенной
-версии официального `api.md` оно не перечислено в таблице полей сделки:
+### 7.9. Подключения, заявки и позиции
 
-- `aggr=false` — обычная запись о биржевой сделке; `price` можно читать как цену
-  этой сделки;
-- `aggr=true` — синтетическая запись, агрегированная из одной или нескольких
-  последовательно прошедших сделок по цене исходной заявки. В такой записи
-  `price` равна цене заявки и **не является фактической ценой отдельной сделки**.
-
-Такой агрегат может появиться, когда ответ биржи по заявке приходит раньше
-события со сделкой. Нельзя вычислять проскальзывание, точный VWAP исполнений или
-делать другие выводы о фактической цене отдельных сделок по `price` записи с
-`aggr=true`; её нужно явно помечать как агрегированную.
+- Market-data подключения определяются сервером/колокацией робота и выдаются
+  как есть. Некоторые источники используются парой, например Definitions
+  вместе с OrderBook или BestPrices.
+- Transactional connections пользователь добавляет из доступных типов; обычно
+  существует хотя бы `0_virtual`.
+- `can_check_pos=true` означает доступность активных заявок, `has_pos=true` —
+  доступность позиций. Не все подключения поддерживают эти данные.
+- Четыре lifecycle подписок: data connections, transaction connections,
+  transaction orders и transaction positions. Каждый состоит из
+  `subscribe_*`, `get_*_updates`, `unsubscribe_*`.
+- Viking может в любой момент прислать повторный snapshot `r="s"`; reader
+  принимает и `r="s"`, и `r="u"`.
+- Отписка всегда передаёт исходный subscription eid как `data.sub_eid`.
+- Неизвестные биржевые поля сохраняются. Удаления подключений, заявок и позиций
+  передаются через `__action="del"`.
 
 ## 8. Как ИИ должен пользоваться MCP
 
