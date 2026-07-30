@@ -555,12 +555,15 @@ class MarketDataService:
                 summary="Портфель не найден.",
             )
         selected = next(
-            item
-            for item in portfolios
-            if item["robot_id"] == robot_id
-            and item["portfolio"] == portfolio
+            (
+                item
+                for item in portfolios
+                if item["robot_id"] == robot_id
+                and item["portfolio"] == portfolio
+            ),
+            None,
         )
-        if not selected["history_available"]:
+        if selected is not None and not selected["history_available"]:
             structured = envelope(
                 [],
                 data_status="history_disabled",
@@ -606,7 +609,17 @@ class MarketDataService:
             serialized_bytes=estimated_bytes,
         )
 
+        data_status = "ok" if rows else "no_data_in_range"
+        notes = [] if rows else ["Данных в запрошенном диапазоне нет."]
         base = {
+            "data_status": data_status,
+            "truncated": False,
+            "coverage": {
+                "from": date_from.isoformat(),
+                "to": date_to.isoformat(),
+                "tz": str(date_from.tzinfo),
+            },
+            "notes": notes,
             "robot_id": robot_id,
             "portfolio": portfolio,
             "date_from": date_from.astimezone(UTC).isoformat(),
@@ -624,7 +637,10 @@ class MarketDataService:
 
         if actual_delivery in {"inline", "summary"}:
             if actual_delivery == "inline":
-                base["rows"] = rows
+                base["items"] = rows
+            else:
+                base["items"] = rows[:preview_rows]
+                base["returned_count"] = len(base["items"])
             summary = (
                 f"Получено {len(rows)} строк для {robot_id}/{portfolio}; режим выдачи: {actual_delivery}."
             )
