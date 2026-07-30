@@ -88,8 +88,8 @@ def service(tmp_path):
 
 async def test_list_history_only(service):
     result = await service.list_available_portfolios(history_only=True)
-    assert result["count"] == 1
-    assert result["portfolios"][0]["portfolio"] == "A"
+    assert result["returned_count"] == 1
+    assert result["items"][0]["portfolio"] == "A"
 
 
 async def test_portfolio_template_preserves_all_field_groups(service):
@@ -107,8 +107,8 @@ async def test_current_portfolio_data_preserves_dynamic_fields(service):
         robot_id="1",
         portfolio="A",
     )
-    assert result["value"]["custom_field"] == 42
-    assert result["unsubscribed"] is True
+    assert result["items"][0]["custom_field"] == 42
+    assert result["subscription_closed"] is True
 
 
 def test_merge_fields_forward_fills():
@@ -192,11 +192,9 @@ async def test_robot_log_history_converts_dates_to_epoch_nsec(service):
         limit=100,
     )
 
-    assert result["mint"] == "1767225600000000000"
-    assert result["maxt"] == "1767225601000000000"
-    assert result["message_filter"] == "*test*"
-    assert result["date_from"] == "2026-01-01T00:00:00+00:00"
-    assert result["date_to"] == "2026-01-01T00:00:01+00:00"
+    assert result["row_count"] == 1
+    assert result["coverage"]["from"] == "2026-01-01T00:00:00+00:00"
+    assert result["coverage"]["to"] == "2026-01-01T00:00:01+00:00"
 
 
 async def test_robot_log_history_rejects_reversed_dates(service):

@@ -3,7 +3,7 @@ from __future__ import annotations
 import contextlib
 import logging
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
@@ -166,6 +166,33 @@ async def list_available_portfolios(history_only: bool = False) -> dict[str, Any
 
 
 @mcp.tool(
+    title="Поиск портфелей",
+    description=(
+        "Фильтрует доступные портфели на сервере по подстроке имени, "
+        "robot_id, владельцу и history_available. Возвращает total_count "
+        "и постраничный items."
+    ),
+    annotations=READ_ONLY,
+)
+async def search_portfolios(
+    query: str | None = None,
+    robot_id: str | None = None,
+    owner: str | None = None,
+    history_only: bool = False,
+    limit: Annotated[int, Field(ge=1, le=1000)] = 200,
+    offset: Annotated[int, Field(ge=0)] = 0,
+) -> dict[str, Any]:
+    return await _service_for_request().search_portfolios(
+        query=query,
+        robot_id=robot_id,
+        owner=owner,
+        history_only=history_only,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@mcp.tool(
     title="Подписаться на доступные портфели",
     description=(
         "Создаёт подписку Viking available_portfolio_list.subscribe. Возвращает полный "
@@ -303,29 +330,42 @@ async def get_portfolio_template(
 async def get_current_portfolio_data(
     robot_id: Annotated[str, Field(min_length=1, description="Идентификатор робота")],
     portfolio: Annotated[str, Field(min_length=1, description="Имя портфеля")],
+    raw: bool = False,
 ) -> CallToolResult:
     try:
         result = await _service_for_request().get_current_portfolio_data(
             robot_id=robot_id,
             portfolio=portfolio,
+            raw=raw,
         )
     except SUBSCRIPTION_ERRORS as exc:
         logger.warning("Current portfolio data request failed: %s", exc)
         return _error_result(exc)
-    securities = result["value"].get("securities", {})
+    if result.get("error_type") == "portfolio_not_found":
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text="Портфель не найден среди доступных портфелей робота.",
+                )
+            ],
+            structuredContent=result,
+            isError=True,
+        )
+    value = result["items"][0]
+    securities = value.get("securities", {})
     return CallToolResult(
         content=[
             TextContent(
                 type="text",
                 text=(
                     f"Получен текущий снапшот {robot_id}/{portfolio}: "
-                    f"{len(result['value'])} полей, {len(securities)} инструментов."
+                    f"{len(value)} полей, {len(securities)} инструментов."
                 ),
             )
         ],
         structuredContent=result,
     )
-
 
 @mcp.tool(
     title="Подписаться на портфель",
@@ -635,6 +675,9 @@ async def get_robot_log_history(
         ),
     ] = None,
     limit: Annotated[int, Field(ge=1, le=100_000)] = 100_000,
+    verbosity: Literal["compact", "full"] = "compact",
+    timezone: str = "Europe/Moscow",
+    raw: bool = False,
 ) -> CallToolResult:
     try:
         result = await _service_for_request().get_robot_log_history(
@@ -643,6 +686,9 @@ async def get_robot_log_history(
             date_to=date_to,
             message_filter=message_filter,
             limit=limit,
+            verbosity=verbosity,
+            timezone=timezone,
+            raw=raw,
         )
     except SUBSCRIPTION_ERRORS as exc:
         logger.warning("Robot log history request failed: %s", exc)
@@ -651,12 +697,14 @@ async def get_robot_log_history(
         content=[
             TextContent(
                 type="text",
-                text=f"Получено записей истории логов робота: {result['log_count']}.",
+                text=(
+                    "Получено записей истории логов робота: "
+                    f"{result['row_count']}."
+                ),
             )
         ],
         structuredContent=result,
     )
-
 
 @mcp.tool(
     title="Подписаться на сделки портфеля",
@@ -763,20 +811,31 @@ async def get_previous_portfolio_deals(
     before: Annotated[datetime, Field(description="ISO 8601 с часовым поясом")],
     security_key: Annotated[str | None, Field(min_length=1)] = None,
     limit: Annotated[int, Field(ge=1, le=100)] = 100,
+    timezone: str = "Europe/Moscow",
+    raw: bool = False,
 ) -> CallToolResult:
     try:
         result = await _service_for_request().get_previous_portfolio_deals(
-            robot_id=robot_id, portfolio=portfolio, before=before,
-            security_key=security_key, limit=limit
+            robot_id=robot_id,
+            portfolio=portfolio,
+            before=before,
+            security_key=security_key,
+            limit=limit,
+            timezone=timezone,
+            raw=raw,
         )
     except SUBSCRIPTION_ERRORS as exc:
         logger.warning("Previous portfolio deals request failed: %s", exc)
         return _error_result(exc)
     return CallToolResult(
-        content=[TextContent(type="text", text=f"Получено сделок: {result['deal_count']}.")],
+        content=[
+            TextContent(
+                type="text",
+                text=f"Получено сделок: {result['row_count']}.",
+            )
+        ],
         structuredContent=result,
     )
-
 
 @mcp.tool(
     title="Инструменты из истории сделок",
@@ -825,21 +884,32 @@ async def get_portfolio_deal_history(
     date_to: Annotated[datetime, Field(description="ISO 8601 с часовым поясом")],
     security_key: Annotated[str | None, Field(min_length=1)] = None,
     limit: Annotated[int, Field(ge=1, le=100_000)] = 100_000,
+    timezone: str = "Europe/Moscow",
+    raw: bool = False,
 ) -> CallToolResult:
     try:
         result = await _service_for_request().get_portfolio_deal_history(
-            robot_id=robot_id, portfolio=portfolio,
-            date_from=date_from, date_to=date_to,
-            security_key=security_key, limit=limit
+            robot_id=robot_id,
+            portfolio=portfolio,
+            date_from=date_from,
+            date_to=date_to,
+            security_key=security_key,
+            limit=limit,
+            timezone=timezone,
+            raw=raw,
         )
     except SUBSCRIPTION_ERRORS as exc:
         logger.warning("Portfolio deal history request failed: %s", exc)
         return _error_result(exc)
     return CallToolResult(
-        content=[TextContent(type="text", text=f"Получено сделок: {result['deal_count']}.")],
+        content=[
+            TextContent(
+                type="text",
+                text=f"Получено сделок: {result['row_count']}.",
+            )
+        ],
         structuredContent=result,
     )
-
 
 @mcp.tool(title="Подписаться на маркет-дата подключения", description=(
     "Подписывается на статусы всех существующих market-data подключений робота. Набор "

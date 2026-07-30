@@ -9,6 +9,7 @@ async def test_mcp_lists_expected_tools():
     tools = {tool.name: tool for tool in result.tools}
     assert set(tools) == {
         "list_available_portfolios",
+        "search_portfolios",
         "subscribe_available_portfolios",
         "get_available_portfolio_updates",
         "unsubscribe_available_portfolios",
@@ -137,21 +138,30 @@ async def test_mcp_portfolio_tool_returns_structured_content(monkeypatch):
 
 async def test_mcp_current_portfolio_data_returns_all_fields(monkeypatch):
     class FakeService:
-        async def get_current_portfolio_data(self, *, robot_id: str, portfolio: str):
+        async def get_current_portfolio_data(
+            self, *, robot_id: str, portfolio: str, raw: bool = False
+        ):
             return {
+                "data_status": "ok",
+                "row_count": 1,
+                "truncated": False,
+                "coverage": None,
+                "notes": [],
                 "robot_id": robot_id,
                 "portfolio": portfolio,
-                "value": {
-                    "name": portfolio,
-                    "dynamic_field": {"nested": True},
-                    "securities": {
-                        "BTCUSDT": {
-                            "sec_key": "BTCUSDT",
-                            "custom_security_field": 123,
-                        }
-                    },
-                },
-                "unsubscribed": True,
+                "subscription_closed": True,
+                "items": [
+                    {
+                        "name": portfolio,
+                        "dynamic_field": {"nested": True},
+                        "securities": {
+                            "BTCUSDT": {
+                                "sec_key": "BTCUSDT",
+                                "custom_security_field": 123,
+                            }
+                        },
+                    }
+                ],
             }
 
     monkeypatch.setattr(main, "_service_for_request", lambda: FakeService())
@@ -163,8 +173,8 @@ async def test_mcp_current_portfolio_data_returns_all_fields(monkeypatch):
         )
 
     assert result.isError is False
-    assert result.structuredContent["value"]["dynamic_field"] == {"nested": True}
-    security = result.structuredContent["value"]["securities"]["BTCUSDT"]
+    assert result.structuredContent["items"][0]["dynamic_field"] == {"nested": True}
+    security = result.structuredContent["items"][0]["securities"]["BTCUSDT"]
     assert security["custom_security_field"] == 123
 
 
@@ -253,21 +263,27 @@ async def test_mcp_robot_log_history_returns_structured_content(monkeypatch):
             date_to,
             message_filter,
             limit,
+            verbosity="compact",
+            timezone="Europe/Moscow",
+            raw=False,
         ):
             return {
+                "data_status": "ok",
+                "row_count": 1,
+                "truncated": False,
+                "coverage": {
+                    "from": date_from.isoformat(),
+                    "to": date_to.isoformat(),
+                    "tz": timezone,
+                },
+                "notes": [],
                 "robot_id": robot_id,
-                "date_from": date_from.isoformat(),
-                "date_to": date_to.isoformat(),
-                "message_filter": message_filter,
-                "limit": limit,
-                "log_count": 1,
-                "logs": [
+                "verbosity": verbosity,
+                "items": [
                     {
                         "dt": "1677586103000245321",
-                        "r_id": robot_id,
-                        "name": "demo",
-                        "level": 1,
-                        "msg": "test",
+                        "dt_iso": "2023-02-28T15:08:23.000+03:00",
+                        "event_type": "log",
                     }
                 ],
             }
@@ -289,5 +305,5 @@ async def test_mcp_robot_log_history_returns_structured_content(monkeypatch):
         )
 
     assert result.isError is False
-    assert result.structuredContent["log_count"] == 1
-    assert result.structuredContent["message_filter"] == "*test*"
+    assert result.structuredContent["row_count"] == 1
+    assert result.structuredContent["verbosity"] == "compact"

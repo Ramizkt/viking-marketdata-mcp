@@ -7,6 +7,13 @@ from typing import Any, Literal
 
 from app.config import Settings
 from app.export_store import ExportedFile, ExportStore
+from app.response_v2 import (
+    add_iso_times,
+    compact_log,
+    envelope,
+    portfolio_not_found,
+    sanitize_value,
+)
 from app.viking_client import VikingClient
 
 Aggregation = Literal["raw", "10s", "1m", "5m", "10m", "1h", "6h", "24h"]
@@ -40,15 +47,64 @@ class MarketDataService:
         self.client = client
         self.export_store = export_store
 
-    async def list_available_portfolios(self, *, history_only: bool = False) -> dict[str, Any]:
-        portfolios = await self.client.list_portfolios()
+    async def list_available_portfolios(
+        self, *, history_only: bool = False
+    ) -> dict[str, Any]:
+        all_portfolios = await self.client.list_portfolios()
+        portfolios = (
+            [item for item in all_portfolios if item["history_available"]]
+            if history_only
+            else all_portfolios
+        )
+        return envelope(
+            portfolios,
+            total_count=len(all_portfolios),
+            returned_count=len(portfolios),
+            history_only=history_only,
+        )
+
+    async def search_portfolios(
+        self,
+        *,
+        query: str | None = None,
+        robot_id: str | None = None,
+        owner: str | None = None,
+        history_only: bool = False,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        if not 1 <= limit <= 1000:
+            raise ValueError("limit must be in range 1..1000")
+        if offset < 0:
+            raise ValueError("offset must be non-negative")
+        rows = await self.client.list_portfolios()
+        if query:
+            needle = query.casefold().replace("*", "")
+            rows = [
+                item
+                for item in rows
+                if needle in item["portfolio"].casefold()
+            ]
+        if robot_id:
+            rows = [item for item in rows if item["robot_id"] == robot_id]
+        if owner:
+            rows = [
+                item
+                for item in rows
+                if owner.casefold() in item["owner"].casefold()
+            ]
         if history_only:
-            portfolios = [item for item in portfolios if item["history_available"]]
-        return {
-            "count": len(portfolios),
-            "history_only": history_only,
-            "portfolios": portfolios,
-        }
+            rows = [item for item in rows if item["history_available"]]
+        total_count = len(rows)
+        items = rows[offset : offset + limit]
+        return envelope(
+            items,
+            truncated=offset + len(items) < total_count,
+            total_count=total_count,
+            returned_count=len(items),
+            offset=offset,
+            limit=limit,
+        )
 
     async def subscribe_available_portfolios(self) -> dict[str, Any]:
         return await self.client.subscribe_available_portfolios()
@@ -81,11 +137,26 @@ class MarketDataService:
         *,
         robot_id: str,
         portfolio: str,
+        raw: bool = False,
     ) -> dict[str, Any]:
-        return await self.client.get_current_portfolio_data(
+        portfolios = await self.client.list_portfolios()
+        not_found = portfolio_not_found(portfolios, robot_id, portfolio)
+        if not_found is not None:
+            return not_found
+        result = await self.client.get_current_portfolio_data(
             robot_id=robot_id,
             portfolio=portfolio,
         )
+        value = sanitize_value(result["value"])
+        response = envelope(
+            [value],
+            robot_id=robot_id,
+            portfolio=portfolio,
+            subscription_closed=True,
+        )
+        if raw:
+            response["raw_response"] = result
+        return response
 
     async def subscribe_portfolio(
         self,
@@ -168,7 +239,12 @@ class MarketDataService:
         date_to: datetime,
         message_filter: str | None,
         limit: int,
+        verbosity: str = "compact",
+        timezone: str = "Europe/Moscow",
+        raw: bool = False,
     ) -> dict[str, Any]:
+        if verbosity not in {"compact", "full"}:
+            raise ValueError("verbosity must be compact or full")
         mint_ns = self._to_epoch_ns(date_from, "date_from")
         maxt_ns = self._to_epoch_ns(date_to, "date_to")
         if int(mint_ns) >= int(maxt_ns):
@@ -177,7 +253,6 @@ class MarketDataService:
             raise ValueError("message_filter must not exceed 256 characters")
         if not 1 <= limit <= 100_000:
             raise ValueError("limit must be in range 1..100000")
-
         result = await self.client.get_robot_log_history(
             robot_id=robot_id,
             mint_ns=mint_ns,
@@ -185,11 +260,28 @@ class MarketDataService:
             message_filter=message_filter,
             limit=limit,
         )
-        return {
-            **result,
-            "date_from": date_from.astimezone(UTC).isoformat(),
-            "date_to": date_to.astimezone(UTC).isoformat(),
-        }
+        logs = result["logs"]
+        items = (
+            [compact_log(item, timezone) for item in logs]
+            if verbosity == "compact"
+            else [add_iso_times(item, timezone) for item in logs]
+        )
+        response = envelope(
+            items,
+            data_status="ok" if items else "no_data_in_range",
+            truncated=len(logs) >= limit,
+            coverage={
+                "from": date_from.isoformat(),
+                "to": date_to.isoformat(),
+                "tz": timezone,
+            },
+            notes=[] if items else ["Логов в запрошенном диапазоне нет."],
+            robot_id=robot_id,
+            verbosity=verbosity,
+        )
+        if raw:
+            response["raw_response"] = result
+        return response
 
     async def subscribe_portfolio_deals(
         self, *, robot_id: str, portfolio: str
@@ -218,6 +310,8 @@ class MarketDataService:
         before: datetime,
         security_key: str | None,
         limit: int,
+        timezone: str = "Europe/Moscow",
+        raw: bool = False,
     ) -> dict[str, Any]:
         before_ns = self._to_epoch_ns(before, "before")
         result = await self.client.get_previous_portfolio_deals(
@@ -227,7 +321,25 @@ class MarketDataService:
             security_key=security_key,
             limit=limit,
         )
-        return {**result, "before": before.astimezone(UTC).isoformat()}
+        items = [add_iso_times(item, timezone) for item in result["deals"]]
+        response = envelope(
+            items,
+            data_status="ok" if items else "no_data_in_range",
+            truncated=len(items) >= limit,
+            coverage={"to": before.isoformat(), "tz": timezone},
+            robot_id=robot_id,
+            portfolio=portfolio,
+            security_key=security_key,
+            estimated_price_share=(
+                sum(1 for item in items if item.get("aggr") is True)
+                / len(items)
+                if items
+                else 0.0
+            ),
+        )
+        if raw:
+            response["raw_response"] = result
+        return response
 
     async def get_portfolio_deal_sec_keys(
         self, *, robot_id: str, portfolio: str
@@ -245,6 +357,8 @@ class MarketDataService:
         date_to: datetime,
         security_key: str | None,
         limit: int,
+        timezone: str = "Europe/Moscow",
+        raw: bool = False,
     ) -> dict[str, Any]:
         mint_ns = self._to_epoch_ns(date_from, "date_from")
         maxt_ns = self._to_epoch_ns(date_to, "date_to")
@@ -258,11 +372,58 @@ class MarketDataService:
             security_key=security_key,
             limit=limit,
         )
-        return {
-            **result,
-            "date_from": date_from.astimezone(UTC).isoformat(),
-            "date_to": date_to.astimezone(UTC).isoformat(),
-        }
+        items = [add_iso_times(item, timezone) for item in result["deals"]]
+        notes: list[str] = []
+        metadata: dict[str, Any] = {}
+        status = "ok"
+        if not items:
+            status = "no_data_in_range"
+            previous = await self.client.get_previous_portfolio_deals(
+                robot_id=robot_id,
+                portfolio=portfolio,
+                before_ns=mint_ns,
+                security_key=security_key,
+                limit=1,
+            )
+            previous_items = [
+                add_iso_times(item, timezone) for item in previous["deals"]
+            ]
+            if previous_items:
+                nearest = previous_items[-1]
+                metadata["nearest_earlier"] = nearest.get("dt_iso")
+                notes.append(
+                    "Сделок в запрошенном окне нет. "
+                    f"Ближайшая более ранняя сделка: {nearest.get('dt_iso')}."
+                )
+            else:
+                notes.append(
+                    "Сделок в запрошенном окне и более ранних "
+                    "доступных сделок нет."
+                )
+        response = envelope(
+            items,
+            data_status=status,
+            truncated=len(items) >= limit,
+            coverage={
+                "from": date_from.isoformat(),
+                "to": date_to.isoformat(),
+                "tz": timezone,
+            },
+            notes=notes,
+            robot_id=robot_id,
+            portfolio=portfolio,
+            security_key=security_key,
+            estimated_price_share=(
+                sum(1 for item in items if item.get("aggr") is True)
+                / len(items)
+                if items
+                else 0.0
+            ),
+            **metadata,
+        )
+        if raw:
+            response["raw_response"] = result
+        return response
 
     async def subscribe_data_connections(self, *, robot_id: str) -> dict[str, Any]:
         return await self.client.subscribe_data_connections(robot_id=robot_id)
@@ -386,6 +547,36 @@ class MarketDataService:
         preview_rows: int,
     ) -> DataDelivery:
         normalized_fields = self._validate_fields(fields or DEFAULT_FIELDS)
+        portfolios = await self.client.list_portfolios()
+        not_found = portfolio_not_found(portfolios, robot_id, portfolio)
+        if not_found is not None:
+            return DataDelivery(
+                structured=not_found,
+                summary="Портфель не найден.",
+            )
+        selected = next(
+            item
+            for item in portfolios
+            if item["robot_id"] == robot_id
+            and item["portfolio"] == portfolio
+        )
+        if not selected["history_available"]:
+            structured = envelope(
+                [],
+                data_status="history_disabled",
+                coverage={
+                    "from": date_from.isoformat(),
+                    "to": date_to.isoformat(),
+                    "tz": str(date_from.tzinfo),
+                },
+                notes=["Сбор истории для портфеля отключён."],
+                robot_id=robot_id,
+                portfolio=portfolio,
+            )
+            return DataDelivery(
+                structured=structured,
+                summary="История для портфеля отключена.",
+            )
         start_ms = self._to_epoch_ms(date_from, "date_from")
         end_ms = self._to_epoch_ms(date_to, "date_to")
         if start_ms >= end_ms:
