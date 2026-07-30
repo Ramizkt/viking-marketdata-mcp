@@ -16,6 +16,7 @@ jobs:
       - name: Apply and test patch
         run: |
           python scripts/apply_v2_contract.py
+          python scripts/fix_v2_tests.py
           uv sync --dev
           uv run ruff check app tests --ignore SIM105
           uv run pytest -q
@@ -28,6 +29,6 @@ jobs:
           git push
       - name: Remove temporary files
         run: |
-          git rm .github/workflows/apply-v2-response-contract.yml .github/workflows/run-v2-response-contract.yml .v2-trigger scripts/apply_v2_contract.py
+          git rm .github/workflows/apply-v2-response-contract.yml .github/workflows/run-v2-response-contract.yml .v2-trigger scripts/apply_v2_contract.py scripts/fix_v2_tests.py
           git commit -m "chore: remove one-shot workflows"
           git push
