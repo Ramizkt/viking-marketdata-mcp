@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 from datetime import datetime
 from difflib import get_close_matches
@@ -89,10 +90,8 @@ def compact_log(row: dict[str, Any], timezone: str) -> dict[str, Any]:
         start = msg.find("{")
         snapshot = None
         if start >= 0:
-            try:
+            with contextlib.suppress(json.JSONDecodeError, TypeError):
                 snapshot = json.loads(msg[start:])
-            except (json.JSONDecodeError, TypeError):
-                pass
         if isinstance(snapshot, dict):
             details["changed_fields"] = sorted(snapshot)[:100]
         details["diff_available"] = False
