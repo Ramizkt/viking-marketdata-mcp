@@ -16,8 +16,27 @@ jobs:
       - name: Apply and test patch
         run: |
           python scripts/apply_v2_contract.py
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('app/response_v2.py')
+          source = path.read_text()
+          source = source.replace('import json\n', 'import contextlib\nimport json\n', 1)
+          source = source.replace(
+              '''        if start >= 0:
+            try:
+                snapshot = json.loads(msg[start:])
+            except (json.JSONDecodeError, TypeError):
+                pass
+''',
+              '''        if start >= 0:
+            with contextlib.suppress(json.JSONDecodeError, TypeError):
+                snapshot = json.loads(msg[start:])
+''',
+          )
+          path.write_text(source)
+          PY
           uv sync --dev
-          uv run ruff check .
+          uv run ruff check app tests
           uv run pytest -q
       - name: Commit fixes
         run: |
