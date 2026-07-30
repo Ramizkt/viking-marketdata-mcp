@@ -632,7 +632,6 @@ class MarketDataService:
             "actual_delivery": actual_delivery,
             "overridden": override_reason is not None,
             "override_reason": override_reason,
-            "preview": rows[:preview_rows],
         }
 
         if actual_delivery in {"inline", "summary"}:
