@@ -13,16 +13,9 @@ jobs:
         with:
           ref: agent/v2-response-contract
       - uses: astral-sh/setup-uv@v5
-      - name: Extract and run patch
+      - name: Apply and test patch
         run: |
-          python - <<'PY'
-          from pathlib import Path
-          source = Path('.github/workflows/apply-v2-response-contract.yml').read_text()
-          body = source.split("cat > /tmp/apply.py <<'PY'\n", 1)[1].split("\n          PY\n", 1)[0]
-          lines = [line[10:] if line.startswith('          ') else line for line in body.splitlines()]
-          Path('/tmp/apply.py').write_text('\n'.join(lines) + '\n')
-          PY
-          python /tmp/apply.py
+          python scripts/apply_v2_contract.py
           uv sync --dev
           uv run ruff check .
           uv run pytest -q
@@ -35,6 +28,6 @@ jobs:
           git push
       - name: Remove temporary files
         run: |
-          git rm .github/workflows/apply-v2-response-contract.yml .github/workflows/run-v2-response-contract.yml .v2-trigger
+          git rm .github/workflows/apply-v2-response-contract.yml .github/workflows/run-v2-response-contract.yml .v2-trigger scripts/apply_v2_contract.py
           git commit -m "chore: remove one-shot workflows"
           git push
