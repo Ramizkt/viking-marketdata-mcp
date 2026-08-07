@@ -1,0 +1,70 @@
+name: Apply direct read-only MCP fix
+
+on:
+  push:
+    branches: [agent/direct-readonly-mcp-calls]
+    paths: [.github/workflows/apply-direct-readonly-fix.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: agent/direct-readonly-mcp-calls
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Apply fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          main = Path('app/main.py')
+          text = main.read_text(encoding='utf-8')
+          old = '''        "Если пользователь не назвал поля, используй buy, sell и pos. Сервер только читает данные. "\n        "Credentials не входят в аргументы MCP-инструментов."'''
+          new = '''        "Если пользователь не назвал поля, используй buy, sell и pos. Сервер только читает данные. "\n        "Credentials не входят в аргументы MCP-инструментов. Все Viking MCP-инструменты этого "\n        "сервера read-only: для чтения данных вызывай их напрямую через MCP. Не запускай Terminal, "\n        "shell, PowerShell, curl, codex exec или другой вложенный агент/CLI как прокси для вызова "\n        "этих инструментов и не запрашивай разрешение на выполнение локальной команды ради чтения "\n        "данных Viking."'''
+          if old not in text:
+              raise SystemExit('main.py instruction anchor not found')
+          main.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          tests = Path('tests/test_mcp.py')
+          text = tests.read_text(encoding='utf-8')
+          old = '''    assert "такую запись также не исключай" in instructions\n    history_schema = tools["get_robot_log_history"].inputSchema["properties"]'''
+          new = '''    assert "такую запись также не исключай" in instructions\n    assert "вызывай их напрямую через MCP" in instructions\n    assert "Не запускай Terminal" in instructions\n    assert "codex exec" in instructions\n    for tool in tools.values():\n        assert tool.annotations.readOnlyHint is True\n        assert tool.annotations.destructiveHint is False\n    history_schema = tools["get_robot_log_history"].inputSchema["properties"]'''
+          if old not in text:
+              raise SystemExit('tests/test_mcp.py anchor not found')
+          tests.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          agents = Path('AGENTS.md')
+          text = agents.read_text(encoding='utf-8')
+          addition = '''\n\n## Direct read-only MCP invocation\n\nВсе текущие Viking MCP-инструменты являются read-only (`readOnlyHint=true`,\n`destructiveHint=false`). Если инструмент уже доступен MCP-клиенту, агент должен\nвызывать его напрямую через MCP. Нельзя запускать Terminal/shell/PowerShell,\n`curl`, `codex exec` или вложенный CLI/агент как прокси только для того, чтобы\nпрочитать Viking через эти же MCP-инструменты: такой обходной путь создаёт\nлишнее пользовательское подтверждение локальной команды и ломает ожидаемый\nread-only UX. Shell допустим только для отдельной задачи, которая действительно\nтребует локального выполнения и не заменяет прямой MCP-вызов.\n'''
+          if '## Direct read-only MCP invocation' not in text:
+              agents.write_text(text.rstrip() + addition, encoding='utf-8')
+
+          workflow = Path('.github/workflows/apply-direct-readonly-fix.yml')
+          workflow.unlink()
+          PY
+
+      - name: Verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run ruff check .
+          uv run pytest -q
+          git diff --check
+
+      - name: Commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Fix direct read-only MCP invocation"
+          git push origin HEAD:agent/direct-readonly-mcp-calls
