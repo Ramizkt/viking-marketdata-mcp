@@ -1,0 +1,59 @@
+name: Normalize fast-path diff
+
+on:
+  push:
+    branches:
+      - agent/avoid-portfolio-preflight
+
+permissions:
+  contents: write
+
+jobs:
+  normalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/avoid-portfolio-preflight
+          fetch-depth: 0
+          persist-credentials: true
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Restore base file and apply minimal patch
+        shell: bash
+        run: |
+          git checkout origin/main -- app/service.py
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("app/service.py")
+          text = path.read_text(encoding="utf-8")
+          text = text.replace(
+              "from app.viking_client import VikingClient\n",
+              "from app.viking_client import VikingAPIError, VikingClient\n",
+              1,
+          )
+          old = '''    async def get_current_portfolio_data(\n        self,\n        *,\n        robot_id: str,\n        portfolio: str,\n        raw: bool = False,\n    ) -> dict[str, Any]:\n        portfolios = await self.client.list_portfolios()\n        not_found = portfolio_not_found(portfolios, robot_id, portfolio)\n        if not_found is not None:\n            return not_found\n        result = await self.client.get_current_portfolio_data(\n            robot_id=robot_id,\n            portfolio=portfolio,\n        )\n        value = sanitize_value(result["value"])\n'''
+          new = '''    async def get_current_portfolio_data(\n        self,\n        *,\n        robot_id: str,\n        portfolio: str,\n        raw: bool = False,\n    ) -> dict[str, Any]:\n        try:\n            result = await self.client.get_current_portfolio_data(\n                robot_id=robot_id,\n                portfolio=portfolio,\n            )\n        except VikingAPIError as exc:\n            try:\n                portfolios = await self.client.list_portfolios()\n            except Exception as diagnostic_exc:\n                raise exc from diagnostic_exc\n            not_found = portfolio_not_found(portfolios, robot_id, portfolio)\n            if not_found is not None:\n                return not_found\n            raise\n        value = sanitize_value(result["value"])\n'''
+          if text.count(old) != 1:
+              raise SystemExit("expected base get_current_portfolio_data block exactly once")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+
+      - name: Verify
+        shell: bash
+        run: |
+          uv sync --dev
+          uv run ruff check .
+          uv run pytest -q
+
+      - name: Commit normalized diff and remove workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/normalize-fast-path-diff.yml
+          git add app/service.py
+          git commit -m "chore: keep current-read fix minimal"
+          git push origin HEAD:agent/avoid-portfolio-preflight
