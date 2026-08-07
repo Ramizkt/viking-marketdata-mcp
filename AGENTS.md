@@ -690,3 +690,5 @@ MCP-инструментов для snapshot/update lifecycle, пагинаци�
 - Для epoch-nanoseconds сохранять исходное поле и добавлять `_iso` в запрошенной timezone.
 - Полные JSON-снапшоты в `msg` не выдавать при compact-режиме. Не выдумывать before/after: если Viking пишет только снапшот, явно указывать `diff_available=false`.
 - Новые агрегаты по роботу нельзя заявлять как быстрые, пока нет измеренного серверного кэша/параллельного плана и приёмочного теста.
+
+- Fast-path invariant: `get_current_portfolio_data` must request the portfolio snapshot directly and must not call `list_portfolios()` before a successful read. The portfolio list may be fetched only after `VikingAPIError` to enrich an accessible-robot `portfolio_not_found` diagnostic; otherwise preserve the original Viking API error.
