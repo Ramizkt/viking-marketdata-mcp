@@ -47,10 +47,14 @@ class MarketDataService:
         self.client = client
         self.export_store = export_store
 
-    async def list_available_portfolios(self, *, history_only: bool = False) -> dict[str, Any]:
+    async def list_available_portfolios(
+        self, *, history_only: bool = False
+    ) -> dict[str, Any]:
         all_portfolios = await self.client.list_portfolios()
         portfolios = (
-            [item for item in all_portfolios if item["history_available"]] if history_only else all_portfolios
+            [item for item in all_portfolios if item["history_available"]]
+            if history_only
+            else all_portfolios
         )
         return envelope(
             portfolios,
@@ -76,11 +80,19 @@ class MarketDataService:
         rows = await self.client.list_portfolios()
         if query:
             needle = query.casefold().replace("*", "")
-            rows = [item for item in rows if needle in item["portfolio"].casefold()]
+            rows = [
+                item
+                for item in rows
+                if needle in item["portfolio"].casefold()
+            ]
         if robot_id:
             rows = [item for item in rows if item["robot_id"] == robot_id]
         if owner:
-            rows = [item for item in rows if owner.casefold() in item["owner"].casefold()]
+            rows = [
+                item
+                for item in rows
+                if owner.casefold() in item["owner"].casefold()
+            ]
         if history_only:
             rows = [item for item in rows if item["history_available"]]
         total_count = len(rows)
@@ -277,8 +289,12 @@ class MarketDataService:
             response["raw_response"] = result
         return response
 
-    async def subscribe_portfolio_deals(self, *, robot_id: str, portfolio: str) -> dict[str, Any]:
-        return await self.client.subscribe_portfolio_deals(robot_id=robot_id, portfolio=portfolio)
+    async def subscribe_portfolio_deals(
+        self, *, robot_id: str, portfolio: str
+    ) -> dict[str, Any]:
+        return await self.client.subscribe_portfolio_deals(
+            robot_id=robot_id, portfolio=portfolio
+        )
 
     async def get_portfolio_deal_updates(
         self, *, subscription_id: str, wait_seconds: float, max_events: int
@@ -287,7 +303,9 @@ class MarketDataService:
             subscription_id, wait_seconds=wait_seconds, max_events=max_events
         )
 
-    async def unsubscribe_portfolio_deals(self, *, subscription_id: str) -> dict[str, Any]:
+    async def unsubscribe_portfolio_deals(
+        self, *, subscription_id: str
+    ) -> dict[str, Any]:
         return await self.client.unsubscribe_portfolio_deals(subscription_id)
 
     async def get_previous_portfolio_deals(
@@ -319,15 +337,22 @@ class MarketDataService:
             portfolio=portfolio,
             security_key=security_key,
             estimated_price_share=(
-                sum(1 for item in items if item.get("aggr") is True) / len(items) if items else 0.0
+                sum(1 for item in items if item.get("aggr") is True)
+                / len(items)
+                if items
+                else 0.0
             ),
         )
         if raw:
             response["raw_response"] = result
         return response
 
-    async def get_portfolio_deal_sec_keys(self, *, robot_id: str, portfolio: str) -> dict[str, Any]:
-        return await self.client.get_portfolio_deal_sec_keys(robot_id=robot_id, portfolio=portfolio)
+    async def get_portfolio_deal_sec_keys(
+        self, *, robot_id: str, portfolio: str
+    ) -> dict[str, Any]:
+        return await self.client.get_portfolio_deal_sec_keys(
+            robot_id=robot_id, portfolio=portfolio
+        )
 
     async def get_portfolio_deal_history(
         self,
@@ -366,15 +391,21 @@ class MarketDataService:
                 security_key=security_key,
                 limit=1,
             )
-            previous_items = [add_iso_times(item, timezone) for item in previous["deals"]]
+            previous_items = [
+                add_iso_times(item, timezone) for item in previous["deals"]
+            ]
             if previous_items:
                 nearest = previous_items[-1]
                 metadata["nearest_earlier"] = nearest.get("dt_iso")
                 notes.append(
-                    f"Сделок в запрошенном окне нет. Ближайшая более ранняя сделка: {nearest.get('dt_iso')}."
+                    "Сделок в запрошенном окне нет. "
+                    f"Ближайшая более ранняя сделка: {nearest.get('dt_iso')}."
                 )
             else:
-                notes.append("Сделок в запрошенном окне и более ранних доступных сделок нет.")
+                notes.append(
+                    "Сделок в запрошенном окне и более ранних "
+                    "доступных сделок нет."
+                )
         response = envelope(
             items,
             data_status=status,
@@ -389,7 +420,10 @@ class MarketDataService:
             portfolio=portfolio,
             security_key=security_key,
             estimated_price_share=(
-                sum(1 for item in items if item.get("aggr") is True) / len(items) if items else 0.0
+                sum(1 for item in items if item.get("aggr") is True)
+                / len(items)
+                if items
+                else 0.0
             ),
             **metadata,
         )
@@ -413,8 +447,12 @@ class MarketDataService:
     async def unsubscribe_data_connections(self, *, subscription_id: str) -> dict[str, Any]:
         return await self.client.unsubscribe_data_connections(subscription_id)
 
-    async def get_transaction_connection(self, *, robot_id: str, sec_type: int, name: str) -> dict[str, Any]:
-        return await self.client.get_transaction_connection(robot_id=robot_id, sec_type=sec_type, name=name)
+    async def get_transaction_connection(
+        self, *, robot_id: str, sec_type: int, name: str
+    ) -> dict[str, Any]:
+        return await self.client.get_transaction_connection(
+            robot_id=robot_id, sec_type=sec_type, name=name
+        )
 
     async def get_transaction_connection_used_securities(
         self, *, robot_id: str, sec_type: int, name: str
@@ -436,13 +474,17 @@ class MarketDataService:
     async def get_all_transaction_connections(self, *, robot_id: str) -> dict[str, Any]:
         return await self.client.get_all_transaction_connections(robot_id=robot_id)
 
-    async def unsubscribe_transaction_connections(self, *, subscription_id: str) -> dict[str, Any]:
+    async def unsubscribe_transaction_connections(
+        self, *, subscription_id: str
+    ) -> dict[str, Any]:
         return await self.client.unsubscribe_transaction_connections(subscription_id)
 
     async def subscribe_transaction_orders(
         self, *, robot_id: str, sec_type: int, name: str
     ) -> dict[str, Any]:
-        return await self.client.subscribe_transaction_orders(robot_id=robot_id, sec_type=sec_type, name=name)
+        return await self.client.subscribe_transaction_orders(
+            robot_id=robot_id, sec_type=sec_type, name=name
+        )
 
     async def get_transaction_order_updates(
         self, *, subscription_id: str, wait_seconds: float, max_events: int
@@ -451,7 +493,9 @@ class MarketDataService:
             subscription_id, wait_seconds=wait_seconds, max_events=max_events
         )
 
-    async def unsubscribe_transaction_orders(self, *, subscription_id: str) -> dict[str, Any]:
+    async def unsubscribe_transaction_orders(
+        self, *, subscription_id: str
+    ) -> dict[str, Any]:
         return await self.client.unsubscribe_transaction_orders(subscription_id)
 
     async def subscribe_transaction_positions(
@@ -468,13 +512,17 @@ class MarketDataService:
             subscription_id, wait_seconds=wait_seconds, max_events=max_events
         )
 
-    async def unsubscribe_transaction_positions(self, *, subscription_id: str) -> dict[str, Any]:
+    async def unsubscribe_transaction_positions(
+        self, *, subscription_id: str
+    ) -> dict[str, Any]:
         return await self.client.unsubscribe_transaction_positions(subscription_id)
 
     async def get_robot_securities(
         self, *, robot_id: str, reload: bool, sec_type: int | None
     ) -> dict[str, Any]:
-        return await self.client.get_robot_securities(robot_id=robot_id, reload=reload, sec_type=sec_type)
+        return await self.client.get_robot_securities(
+            robot_id=robot_id, reload=reload, sec_type=sec_type
+        )
 
     async def get_robot_client_codes(self, *, robot_id: str) -> dict[str, Any]:
         return await self.client.get_robot_client_codes(robot_id=robot_id)
@@ -513,7 +561,12 @@ class MarketDataService:
                 summary="Портфель не найден.",
             )
         selected = next(
-            (item for item in portfolios if item["robot_id"] == robot_id and item["portfolio"] == portfolio),
+            (
+                item
+                for item in portfolios
+                if item["robot_id"] == robot_id
+                and item["portfolio"] == portfolio
+            ),
             None,
         )
         if selected is not None and not selected["history_available"]:
@@ -693,5 +746,8 @@ class MarketDataService:
         utc_value = value.astimezone(UTC)
         epoch = datetime(1970, 1, 1, tzinfo=UTC)
         delta = utc_value - epoch
-        total_microseconds = (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+        total_microseconds = (
+            (delta.days * 86_400 + delta.seconds) * 1_000_000
+            + delta.microseconds
+        )
         return str(total_microseconds * 1_000)
