@@ -1,15 +1,16 @@
 name: Apply direct read-only MCP fix
 
 on:
-  push:
-    branches: [agent/direct-readonly-mcp-calls]
-    paths: [.github/workflows/apply-direct-readonly-fix.yml]
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
 
 permissions:
   contents: write
 
 jobs:
   apply:
+    if: github.head_ref == 'agent/direct-readonly-mcp-calls'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
