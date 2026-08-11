@@ -107,6 +107,19 @@ async def test_mcp_lists_expected_tools():
     assert "вызывай их напрямую в текущем агенте" in instructions
     assert "Не создавай subagent или дочерний Codex" in instructions
     assert "codex exec, Terminal или shell" in instructions
+    assert "Для любого вопроса о том, торгуется ли портфель" in instructions
+    assert "всегда используй get_robot_portfolio_trading_status" in instructions
+    assert "Не вызывай для определения этого состояния get_current_portfolio_data" in instructions
+    assert "disabled — только статус состояния портфеля" in instructions
+    assert "только если пользователь явно спрашивает состояние disabled/enabled" in instructions
+    trading_description = tools["get_robot_portfolio_trading_status"].description or ""
+    assert "Единственный инструмент для вопросов" in trading_description
+    assert "disabled не является статусом торговли" in trading_description
+    assert "явно спрашивает disabled/enabled" in trading_description
+    current_description = tools["get_current_portfolio_data"].description or ""
+    assert "Не используй этот инструмент для определения" in current_description
+    assert "всегда используй get_robot_portfolio_trading_status" in current_description
+    assert "disabled означает только состояние портфеля" in current_description
     assert all(
         tool.annotations is not None and tool.annotations.readOnlyHint is True
         for tool in tools.values()

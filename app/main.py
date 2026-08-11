@@ -46,10 +46,15 @@ mcp = FastMCP(
         "codex exec, Terminal или shell только для проксирования этих MCP-вызовов. Multi-agent допустим "
         "только для самостоятельной работы, которая не является обёрткой над read-only MCP. "
         "Сначала вызывай list_available_portfolios. "
+        "Для любого вопроса о том, торгуется ли портфель, включена/выключена ли торговля, "
+        "активна ли торговля, запущена ли торговля — всегда используй "
+        "get_robot_portfolio_trading_status. Не вызывай для определения этого состояния "
+        "get_current_portfolio_data и не интерпретируй disabled как статус торговли, даже если поле "
+        "disabled уже присутствует в полученных данных. disabled — только статус состояния портфеля "
+        "и может проверяться только если пользователь явно спрашивает состояние disabled/enabled "
+        "самого портфеля. Статус торговли берётся только из robot.subscribe value.re[].re, где true "
+        "означает re_sell или re_buy. "
         "Текущее полное состояние портфеля получай через get_current_portfolio_data. "
-        "Для вопросов о том, какие портфели робота торгуются или не торгуются, используй "
-        "get_robot_portfolio_trading_status: статус берётся только из robot.subscribe value.re[].re, "
-        "где true означает re_sell или re_buy. Не используй portfolio.disabled. "
         "Схему и назначение динамических полей получай через get_portfolio_template. "
         "Для исторической выгрузки выбирай портфель с history_available=true; "
         "в get_portfolio_data даты всегда передавай с часовым поясом. "
@@ -203,11 +208,13 @@ async def search_portfolios(
 @mcp.tool(
     title="Статус торговли портфелей робота",
     description=(
-        "Одним robot.subscribe получает весь массив value.re и определяет статус каждого "
-        "портфеля только по re: re=true означает re_sell или re_buy и статус trading; "
-        "re=false означает not_trading. portfolio.disabled для этого не используется. "
-        "trading_only=true возвращает только торгующиеся портфели. Отдельных "
-        "portfolio.subscribe по каждому портфелю нет."
+        "Единственный инструмент для вопросов о том, торгуется ли портфель, включена/выключена, "
+        "активна или запущена ли торговля. Одним robot.subscribe получает весь массив value.re и "
+        "определяет статус каждого портфеля только по re: re=true означает re_sell или re_buy и "
+        "статус trading; re=false означает not_trading. disabled не является статусом торговли: "
+        "это только статус состояния портфеля и его следует проверять только если пользователь "
+        "явно спрашивает disabled/enabled. trading_only=true возвращает только торгующиеся "
+        "портфели. Отдельных portfolio.subscribe по каждому портфелю нет."
     ),
     annotations=READ_ONLY,
 )
@@ -366,7 +373,10 @@ async def get_portfolio_template(
     description=(
         "Возвращает полный текущий снапшот портфеля через Viking portfolio.subscribe и сразу "
         "закрывает служебную подписку через portfolio.unsubscribe. Сохраняет без фильтрации "
-        "все поля шаблона портфеля, uf0..uf19, timetable и все поля securities."
+        "все поля шаблона портфеля, uf0..uf19, timetable и все поля securities. Не используй этот "
+        "инструмент для определения того, включена/активна/запущена ли торговля: для этого всегда "
+        "используй get_robot_portfolio_trading_status. Поле disabled означает только состояние "
+        "портфеля и проверяется только при явном вопросе пользователя о disabled/enabled."
     ),
     annotations=READ_ONLY,
 )
