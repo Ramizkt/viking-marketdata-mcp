@@ -103,6 +103,14 @@ async def test_mcp_lists_expected_tools():
     assert "aggr=true не фильтруй" in instructions
     assert "учитывать во всех подсчётах и расчётах" in instructions
     assert "такую запись также не исключай" in instructions
+    assert "read-only инструментами этого MCP" in instructions
+    assert "вызывай их напрямую в текущем агенте" in instructions
+    assert "Не создавай subagent или дочерний Codex" in instructions
+    assert "codex exec, Terminal или shell" in instructions
+    assert all(
+        tool.annotations is not None and tool.annotations.readOnlyHint is True
+        for tool in tools.values()
+    )
     history_schema = tools["get_robot_log_history"].inputSchema["properties"]
     message_filter_string = next(
         option

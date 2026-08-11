@@ -40,7 +40,12 @@ mcp = FastMCP(
     "Viking Market Data",
     instructions=(
         "Пользователь уже прошёл безопасную браузерную OAuth-авторизацию. Никогда не проси "
-        "email или API key в чате. Сначала вызывай list_available_portfolios. "
+        "email или API key в чате. "
+        "Если задача может быть выполнена одним или несколькими read-only инструментами этого MCP, "
+        "вызывай их напрямую в текущем агенте. Не создавай subagent или дочерний Codex и не запускай "
+        "codex exec, Terminal или shell только для проксирования этих MCP-вызовов. Multi-agent допустим "
+        "только для самостоятельной работы, которая не является обёрткой над read-only MCP. "
+        "Сначала вызывай list_available_portfolios. "
         "Текущее полное состояние портфеля получай через get_current_portfolio_data. "
         "Для вопросов о том, какие портфели робота торгуются или не торгуются, используй "
         "get_robot_portfolio_trading_status: статус берётся только из robot.subscribe value.re[].re, "
