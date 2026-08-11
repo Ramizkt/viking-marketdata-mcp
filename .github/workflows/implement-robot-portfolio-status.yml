@@ -1,4 +1,4 @@
-name: Implement robot portfolio trading aggregate
+name: Materialize robot portfolio aggregate patch
 
 on:
   push:
@@ -11,46 +11,32 @@ permissions:
   contents: write
 
 jobs:
-  implement:
+  materialize:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: agent/robot-portfolio-trading-status
-          fetch-depth: 2
+          fetch-depth: 3
           persist-credentials: true
-      - uses: astral-sh/setup-uv@v5
-      - name: Recover and run implementation script
+      - name: Recover patch script from first workflow revision
         shell: bash
         run: |
-          git show HEAD^:.github/workflows/implement-robot-portfolio-status.yml > /tmp/previous-workflow.yml
+          git show HEAD^^:.github/workflows/implement-robot-portfolio-status.yml > /tmp/original-workflow.yml
           python - <<'PY'
           from pathlib import Path
 
-          text = Path('/tmp/previous-workflow.yml').read_text(encoding='utf-8')
+          text = Path('/tmp/original-workflow.yml').read_text(encoding='utf-8')
           start_marker = "          python - <<'PY'\n"
           end_marker = "\n          PY\n      - name: Verify"
           start = text.index(start_marker) + len(start_marker)
           end = text.index(end_marker, start)
           lines = text[start:end].splitlines()
-          normalized = []
-          for line in lines:
-              normalized.append(line[10:] if line.startswith('          ') else line)
-          Path('/tmp/implement.py').write_text('\n'.join(normalized) + '\n', encoding='utf-8')
+          normalized = [line[10:] if line.startswith('          ') else line for line in lines]
+          Path('.tmp_implement_robot_status.py').write_text('\n'.join(normalized) + '\n', encoding='utf-8')
           PY
-          python /tmp/implement.py
-      - name: Verify
-        shell: bash
-        run: |
-          uv sync --dev
-          uv run ruff check .
-          uv run pytest -q
-      - name: Commit implementation and remove one-shot workflow
-        shell: bash
-        run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm .github/workflows/implement-robot-portfolio-status.yml
-          git add app/viking_client.py app/service.py app/main.py tests/test_robot_portfolio_trading_status.py README.md AGENTS.md
-          git commit -m "feat: add robot portfolio trading status aggregate"
+          git add .tmp_implement_robot_status.py
+          git commit -m "chore: materialize robot status patch script"
           git push origin HEAD:agent/robot-portfolio-trading-status
