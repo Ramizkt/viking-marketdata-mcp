@@ -1,0 +1,167 @@
+name: Apply strict trading status routing
+
+on:
+  push:
+    branches:
+      - agent/strict-trading-status-routing
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v7
+        with:
+          ref: agent/strict-trading-status-routing
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Apply routing rule
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('app/main.py')
+          text = path.read_text()
+
+          old = (
+              '        "Сначала вызывай list_available_portfolios. "\n'
+              '        "Текущее полное состояние портфеля получай через get_current_portfolio_data. "\n'
+              '        "Для вопросов о том, какие портфели робота торгуются или не торгуются, используй "\n'
+              '        "get_robot_portfolio_trading_status: статус берётся только из robot.subscribe value.re[].re, "\n'
+              '        "где true означает re_sell или re_buy. Не используй portfolio.disabled. "\n'
+          )
+          new = (
+              '        "Сначала вызывай list_available_portfolios. "\n'
+              '        "Для любого вопроса о том, торгуется ли портфель, включена/выключена ли торговля, "\n'
+              '        "активна ли торговля, запущена ли торговля — всегда используй "\n'
+              '        "get_robot_portfolio_trading_status. Не вызывай для определения этого состояния "\n'
+              '        "get_current_portfolio_data и не интерпретируй disabled как статус торговли, даже если поле "\n'
+              '        "disabled уже присутствует в полученных данных. disabled — только статус состояния портфеля "\n'
+              '        "и может проверяться только если пользователь явно спрашивает состояние disabled/enabled "\n'
+              '        "самого портфеля. Статус торговли берётся только из robot.subscribe value.re[].re, где true "\n'
+              '        "означает re_sell или re_buy. "\n'
+              '        "Текущее полное состояние портфеля получай через get_current_portfolio_data. "\n'
+          )
+          if old not in text:
+              raise SystemExit('server instruction anchor not found')
+          text = text.replace(old, new, 1)
+
+          old = (
+              '        "Одним robot.subscribe получает весь массив value.re и определяет статус каждого "\n'
+              '        "портфеля только по re: re=true означает re_sell или re_buy и статус trading; "\n'
+              '        "re=false означает not_trading. portfolio.disabled для этого не используется. "\n'
+              '        "trading_only=true возвращает только торгующиеся портфели. Отдельных "\n'
+              '        "portfolio.subscribe по каждому портфелю нет."\n'
+          )
+          new = (
+              '        "Единственный инструмент для вопросов о том, торгуется ли портфель, включена/выключена, "\n'
+              '        "активна или запущена ли торговля. Одним robot.subscribe получает весь массив value.re и "\n'
+              '        "определяет статус каждого портфеля только по re: re=true означает re_sell или re_buy и "\n'
+              '        "статус trading; re=false означает not_trading. disabled не является статусом торговли: "\n'
+              '        "это только статус состояния портфеля и его следует проверять только если пользователь "\n'
+              '        "явно спрашивает disabled/enabled. trading_only=true возвращает только торгующиеся "\n'
+              '        "портфели. Отдельных portfolio.subscribe по каждому портфелю нет."\n'
+          )
+          if old not in text:
+              raise SystemExit('trading tool description anchor not found')
+          text = text.replace(old, new, 1)
+
+          old = (
+              '        "Возвращает полный текущий снапшот портфеля через Viking portfolio.subscribe и сразу "\n'
+              '        "закрывает служебную подписку через portfolio.unsubscribe. Сохраняет без фильтрации "\n'
+              '        "все поля шаблона портфеля, uf0..uf19, timetable и все поля securities."\n'
+          )
+          new = (
+              '        "Возвращает полный текущий снапшот портфеля через Viking portfolio.subscribe и сразу "\n'
+              '        "закрывает служебную подписку через portfolio.unsubscribe. Сохраняет без фильтрации "\n'
+              '        "все поля шаблона портфеля, uf0..uf19, timetable и все поля securities. Не используй этот "\n'
+              '        "инструмент для определения того, включена/активна/запущена ли торговля: для этого всегда "\n'
+              '        "используй get_robot_portfolio_trading_status. Поле disabled означает только состояние "\n'
+              '        "портфеля и проверяется только при явном вопросе пользователя о disabled/enabled."\n'
+          )
+          if old not in text:
+              raise SystemExit('current portfolio description anchor not found')
+          path.write_text(text.replace(old, new, 1))
+
+          path = Path('tests/test_mcp.py')
+          text = path.read_text()
+          old = (
+              '    assert "codex exec, Terminal или shell" in instructions\n'
+              '    assert all(\n'
+          )
+          new = (
+              '    assert "codex exec, Terminal или shell" in instructions\n'
+              '    assert "Для любого вопроса о том, торгуется ли портфель" in instructions\n'
+              '    assert "всегда используй get_robot_portfolio_trading_status" in instructions\n'
+              '    assert "Не вызывай для определения этого состояния get_current_portfolio_data" in instructions\n'
+              '    assert "disabled — только статус состояния портфеля" in instructions\n'
+              '    assert "только если пользователь явно спрашивает состояние disabled/enabled" in instructions\n'
+              '    trading_description = tools["get_robot_portfolio_trading_status"].description or ""\n'
+              '    assert "Единственный инструмент для вопросов" in trading_description\n'
+              '    assert "disabled не является статусом торговли" in trading_description\n'
+              '    assert "явно спрашивает disabled/enabled" in trading_description\n'
+              '    current_description = tools["get_current_portfolio_data"].description or ""\n'
+              '    assert "Не используй этот инструмент для определения" in current_description\n'
+              '    assert "всегда используй get_robot_portfolio_trading_status" in current_description\n'
+              '    assert "disabled означает только состояние портфеля" in current_description\n'
+              '    assert all(\n'
+          )
+          if old not in text:
+              raise SystemExit('test instruction anchor not found')
+          path.write_text(text.replace(old, new, 1))
+
+          path = Path('AGENTS.md')
+          text = path.read_text()
+          old = (
+              'Snapshot сохраняется без фильтрации:\n\n'
+              '- стандартные и динамические поля портфеля;\n'
+              '- `uf0...uf19`;\n'
+              '- `timetable`;\n'
+              '- `securities`;\n'
+              '- все динамические поля инструментов.\n\n'
+              '### 7.5. Подписка на изменения одного портфеля\n'
+          )
+          new = (
+              'Snapshot сохраняется без фильтрации:\n\n'
+              '- стандартные и динамические поля портфеля;\n'
+              '- `uf0...uf19`;\n'
+              '- `timetable`;\n'
+              '- `securities`;\n'
+              '- все динамические поля инструментов.\n\n'
+              'Критическое правило маршрутизации: для любого вопроса о том, торгуется ли портфель,\n'
+              'включена/выключена ли торговля, активна ли торговля или запущена ли торговля, всегда\n'
+              'используйте `get_robot_portfolio_trading_status`. Не используйте для определения этого\n'
+              'состояния `get_current_portfolio_data` и не интерпретируйте поле `disabled` как статус\n'
+              'торговли, даже если оно уже присутствует в snapshot. `disabled` — только статус состояния\n'
+              'портфеля; проверять его следует только если пользователь явно спрашивает состояние\n'
+              '`disabled`/`enabled` самого портфеля. Торговый статус определяется только по\n'
+              '`robot.subscribe.value.re[].re`: `true` означает, что включён `re_sell` или `re_buy`.\n\n'
+              '### 7.5. Подписка на изменения одного портфеля\n'
+          )
+          if old not in text:
+              raise SystemExit('AGENTS current portfolio anchor not found')
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+      - name: Validate
+        run: |
+          uv run ruff check app tests
+          uv run pytest -q
+
+      - name: Commit rule
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/main.py tests/test_mcp.py AGENTS.md
+          git commit -m "fix: route trading status queries explicitly"
+          git push
