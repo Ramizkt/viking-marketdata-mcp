@@ -30,6 +30,49 @@ jobs:
           source = '\n'.join(line[10:] if line.startswith('          ') else line for line in source.splitlines())
           exec(compile(source, '<robot-trading-fix>', 'exec'))
           PY
+      - name: Normalize generated indentation
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def indent_method_body(path, start_marker, end_marker, signature_single_line=False):
+              p = Path(path)
+              lines = p.read_text().splitlines()
+              start = next(i for i, line in enumerate(lines) if start_marker in line)
+              end = next(i for i in range(start + 1, len(lines)) if end_marker in lines[i])
+              if signature_single_line:
+                  body_start = start + 1
+              else:
+                  close = next(i for i in range(start, end) if lines[i].lstrip().startswith(') ->'))
+                  body_start = close + 1
+              for i in range(body_start, end):
+                  if lines[i]:
+                      lines[i] = '    ' + lines[i]
+              p.write_text('\n'.join(lines) + '\n')
+
+          indent_method_body(
+              'app/viking_client.py',
+              'async def get_robot_portfolio_summary(',
+              'async def get_current_portfolio_data_many(',
+              signature_single_line=True,
+          )
+          indent_method_body(
+              'app/service.py',
+              'async def get_robot_portfolio_trading_status(',
+              'async def subscribe_available_portfolios(',
+          )
+
+          p = Path('app/main.py')
+          lines = p.read_text().splitlines()
+          start = next(i for i, line in enumerate(lines) if line.startswith('async def get_robot_portfolio_trading_status('))
+          close = next(i for i in range(start, len(lines)) if lines[i].lstrip().startswith(') -> CallToolResult:'))
+          end = next(i for i in range(close + 1, len(lines)) if lines[i].startswith('@mcp.tool('))
+          for i in range(close + 1, end):
+              if lines[i]:
+                  lines[i] = '    ' + lines[i]
+          p.write_text('\n'.join(lines) + '\n')
+          PY
       - name: Test
         run: |
           uv run pytest tests/test_robot_portfolio_trading_status.py tests/test_mcp.py
