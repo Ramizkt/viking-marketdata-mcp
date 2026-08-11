@@ -171,15 +171,22 @@ class VikingClient:
         assert last_error is not None
         raise ConnectionError(f"Viking API request failed after reconnect: {message_type}") from last_error
 
-    async def list_portfolios(self) -> list[dict[str, Any]]:
-        """Return all accessible portfolios and whether history is enabled."""
+    async def list_available_portfolios_basic(self) -> list[dict[str, Any]]:
+        """Return accessible portfolio identities without the history lookup."""
         snapshot = await self.subscribe_available_portfolios()
-        all_rows = snapshot["portfolios_add"]
+        rows = [dict(item) for item in snapshot["portfolios_add"]]
         try:
             await self.unsubscribe_available_portfolios(snapshot["subscription_id"])
         except Exception:
             logger.warning("Could not unsubscribe from available portfolio list", exc_info=True)
+            self._subscriptions.pop(snapshot["subscription_id"], None)
+            await self.close()
+        rows.sort(key=lambda item: (item["robot_id"], item["portfolio"]))
+        return rows
 
+    async def list_portfolios(self) -> list[dict[str, Any]]:
+        """Return all accessible portfolios and whether history is enabled."""
+        all_rows = await self.list_available_portfolios_basic()
         history_response = await self.request("available_portfolio_list.get_with_history", {})
         history_rows = history_response.get("data", {}).get("portfolios", [])
         history_ids = {(str(row[0]), str(row[1])) for row in history_rows if len(row) >= 2}
@@ -434,6 +441,177 @@ class VikingClient:
             "active": False,
             "unsubscribed": True,
             "unsubscribe_response": unsubscribe_response,
+        }
+
+    async def get_robot_portfolio_summary(self, *, robot_id: str) -> dict[str, Any]:
+        """Return robot-wide portfolio counters from one robot.subscribe snapshot."""
+        if not robot_id:
+            raise ValueError("robot_id must not be empty")
+        response = await self._subscribe("robot.subscribe", {"r_id": robot_id})
+        subscription_id = self._required_str(response, "eid")
+        try:
+            self._validate_response_identity(
+                response,
+                expected_type="robot.subscribe",
+                expected_eid=subscription_id,
+            )
+            result = self._required_str(response, "r")
+            if result != "s":
+                raise VikingProtocolError(
+                    "robot.subscribe returned an unexpected result; expected r='s'"
+                )
+            data = self._required_dict(response, "data")
+            if self._required_str(data, "r_id") != robot_id:
+                raise VikingProtocolError("Unexpected robot.subscribe r_id")
+            value = self._required_dict(data, "value")
+            all_portfolios = self._required_int(value, "p_a")
+            disabled_portfolios = self._required_int(value, "p_d")
+            expired_portfolios = self._required_int(value, "p_e")
+            trading_status = self._required_int(value, "tr")
+            if all_portfolios < 0:
+                raise VikingProtocolError("robot.subscribe p_a must be non-negative")
+            if not 0 <= disabled_portfolios <= all_portfolios:
+                raise VikingProtocolError("robot.subscribe p_d must be in range 0..p_a")
+            if expired_portfolios < 0:
+                raise VikingProtocolError("robot.subscribe p_e must be non-negative")
+            if trading_status not in {0, 2, 3}:
+                raise VikingProtocolError("robot.subscribe tr must be 0, 2 or 3")
+        except BaseException:
+            self._subscriptions.pop(subscription_id, None)
+            await self.close()
+            raise
+
+        try:
+            await self._unsubscribe_log_subscription(
+                subscription_id,
+                expected_subscribe_type="robot.subscribe",
+                unsubscribe_type="robot.unsubscribe",
+            )
+        except BaseException:
+            self._subscriptions.pop(subscription_id, None)
+            await self.close()
+            raise
+
+        return {
+            "robot_id": robot_id,
+            "all_portfolios": all_portfolios,
+            "disabled_portfolios": disabled_portfolios,
+            "enabled_portfolios": all_portfolios - disabled_portfolios,
+            "expired_portfolios": expired_portfolios,
+            "robot_trading_status": trading_status,
+            "robot_trading": (
+                False if trading_status == 0 else True if trading_status == 2 else None
+            ),
+            "subscription_closed": True,
+        }
+
+    async def get_current_portfolio_data_many(
+        self,
+        *,
+        robot_id: str,
+        portfolios: list[str],
+    ) -> dict[str, Any]:
+        """Read many portfolio snapshots using Viking request groups of at most 50 messages."""
+        if not robot_id:
+            raise ValueError("robot_id must not be empty")
+        if len(portfolios) > 5_000:
+            raise ValueError("portfolios must contain at most 5000 names")
+        if any(not isinstance(portfolio, str) or not portfolio for portfolio in portfolios):
+            raise ValueError("portfolio names must be non-empty strings")
+        if len(set(portfolios)) != len(portfolios):
+            raise ValueError("portfolio names must be unique")
+        if not portfolios:
+            return {
+                "robot_id": robot_id,
+                "item_count": 0,
+                "items": [],
+                "group_size": 50,
+                "cleanup_reconnected": False,
+            }
+
+        subscribe_requests = [
+            ("portfolio.subscribe", {"r_id": robot_id, "p_id": portfolio})
+            for portfolio in portfolios
+        ]
+        grouped = await self._grouped_exchange(
+            subscribe_requests,
+            register_subscriptions=True,
+        )
+
+        items: list[dict[str, Any]] = []
+        active_subscriptions: list[tuple[str, str]] = []
+        try:
+            for portfolio, (subscription_id, outcome) in zip(
+                portfolios, grouped, strict=True
+            ):
+                if isinstance(outcome, VikingAPIError):
+                    item: dict[str, Any] = {
+                        "portfolio": portfolio,
+                        "ok": False,
+                        "error_type": "VikingAPIError",
+                        "message": str(outcome),
+                    }
+                    if outcome.code is not None:
+                        item["code"] = outcome.code
+                    items.append(item)
+                    continue
+                event = self._parse_portfolio_subscription_event(
+                    outcome,
+                    subscription_id=subscription_id,
+                    expected_robot_id=robot_id,
+                    expected_portfolio=portfolio,
+                    allowed_results={"s"},
+                    require_complete_snapshot=True,
+                )
+                active_subscriptions.append((portfolio, subscription_id))
+                items.append(
+                    {
+                        "portfolio": portfolio,
+                        "ok": True,
+                        "value": event["value"],
+                    }
+                )
+        except VikingProtocolError:
+            await self.close()
+            raise
+
+        cleanup_reconnected = False
+        if active_subscriptions:
+            try:
+                unsubscribe_results = await self._grouped_exchange(
+                    [
+                        ("portfolio.unsubscribe", {"sub_eid": subscription_id})
+                        for _, subscription_id in active_subscriptions
+                    ],
+                    register_subscriptions=False,
+                )
+                cleanup_failed = False
+                for (_, subscription_id), (_, outcome) in zip(
+                    active_subscriptions, unsubscribe_results, strict=True
+                ):
+                    if isinstance(outcome, VikingAPIError):
+                        cleanup_failed = True
+                        continue
+                    result = self._required_str(outcome, "r")
+                    if result != "p":
+                        await self.close()
+                        raise VikingProtocolError(
+                            "portfolio.unsubscribe returned an unexpected result; expected r='p'"
+                        )
+                    self._subscriptions.pop(subscription_id, None)
+                if cleanup_failed:
+                    cleanup_reconnected = True
+                    await self.close()
+            except (TimeoutError, ConnectionError, ConnectionClosed):
+                cleanup_reconnected = True
+                await self.close()
+
+        return {
+            "robot_id": robot_id,
+            "item_count": len(items),
+            "items": items,
+            "group_size": 50,
+            "cleanup_reconnected": cleanup_reconnected,
         }
 
     async def subscribe_portfolio(
@@ -1527,6 +1705,90 @@ class VikingClient:
             )
 
         return [{"dt": timestamp, "v": points_by_time[timestamp]} for timestamp in sorted(points_by_time)]
+
+    async def _grouped_exchange(
+        self,
+        requests: list[tuple[str, dict[str, Any]]],
+        *,
+        register_subscriptions: bool,
+        timeout: float | None = None,
+    ) -> list[tuple[str, dict[str, Any] | VikingAPIError]]:
+        """Send request groups documented by Viking; one JSON list contains at most 50 messages."""
+        if not requests:
+            return []
+        await self._ensure_connected()
+        ws = self._ws
+        if ws is None or ws.state is not State.OPEN:
+            raise ConnectionError("Viking WebSocket is not connected")
+
+        loop = asyncio.get_running_loop()
+        records: list[
+            tuple[
+                str,
+                str,
+                dict[str, Any],
+                asyncio.Future[dict[str, Any]],
+                dict[str, Any],
+            ]
+        ] = []
+        for message_type, data in requests:
+            eid = uuid.uuid4().hex
+            future: asyncio.Future[dict[str, Any]] = loop.create_future()
+            self._pending[eid] = future
+            if register_subscriptions:
+                self._subscriptions[eid] = _Subscription(
+                    message_type,
+                    asyncio.Queue(maxsize=1_000),
+                    request_data=dict(data),
+                )
+            payload = {"type": message_type, "data": data, "eid": eid}
+            records.append((eid, message_type, data, future, payload))
+
+        try:
+            async with self._send_lock:
+                payloads = [record[4] for record in records]
+                for offset in range(0, len(payloads), 50):
+                    group = payloads[offset : offset + 50]
+                    await ws.send(json.dumps(group, separators=(",", ":")))
+            responses = await asyncio.wait_for(
+                asyncio.gather(*(record[3] for record in records)),
+                timeout=timeout or self.settings.viking_request_timeout_seconds,
+            )
+        except BaseException:
+            for eid, _, _, _, _ in records:
+                self._pending.pop(eid, None)
+                if register_subscriptions:
+                    self._subscriptions.pop(eid, None)
+            await self.close()
+            raise
+        finally:
+            for eid, _, _, _, _ in records:
+                self._pending.pop(eid, None)
+
+        outcomes: list[tuple[str, dict[str, Any] | VikingAPIError]] = []
+        try:
+            for (eid, message_type, _, _, _), response in zip(
+                records, responses, strict=True
+            ):
+                self._validate_response_identity(
+                    response,
+                    expected_type=message_type,
+                    expected_eid=eid,
+                )
+                result = self._required_str(response, "r")
+                if result == "e":
+                    if register_subscriptions:
+                        self._subscriptions.pop(eid, None)
+                    try:
+                        self._raise_api_error(response)
+                    except VikingAPIError as exc:
+                        outcomes.append((eid, exc))
+                        continue
+                outcomes.append((eid, response))
+        except VikingProtocolError:
+            await self.close()
+            raise
+        return outcomes
 
     async def _ensure_connected(self) -> None:
         if self.connected:

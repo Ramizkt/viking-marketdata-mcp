@@ -692,3 +692,14 @@ MCP-инструментов для snapshot/update lifecycle, пагинаци�
 - Новые агрегаты по роботу нельзя заявлять как быстрые, пока нет измеренного серверного кэша/параллельного плана и приёмочного теста.
 
 - Fast-path invariant: `get_current_portfolio_data` must request the portfolio snapshot directly and must not call `list_portfolios()` before a successful read. The portfolio list may be fetched only after `VikingAPIError` to enrich an accessible-robot `portfolio_not_found` diagnostic; otherwise preserve the original Viking API error.
+
+
+## Robot portfolio trading aggregate
+
+- `get_robot_portfolio_trading_status` is the canonical tool for enabled/disabled portfolio counts and names. Agents must not fan out `get_current_portfolio_data` for every portfolio to answer this class of question.
+- Fast count path: `robot.subscribe` -> snapshot fields `p_a` (all), `p_d` (disabled), `p_e` (expired), `tr` -> `robot.unsubscribe`. `enabled = p_a - p_d`. The API documents `p_a/p_d/p_e` as robot-wide counters; do not present them as access-scoped when the current role sees only a subset.
+- Accessible identities come from `available_portfolio_list.subscribe`/`unsubscribe` without the extra history lookup.
+- Detailed names/statuses use `portfolio.subscribe.value.disabled`; only boolean `false` means explicitly enabled and boolean `true` means disabled. Missing/non-boolean values or per-portfolio errors are `unknown`.
+- Detailed reads are sent to Viking as JSON request groups with a hard maximum of 50 messages, matching the official API grouping limit. A whole group costs 49 rate-limit points according to the API, so preserve grouped transport for large robot scans.
+- Grouped subscriptions must always be grouped-unsubscribed. If cleanup acknowledgements fail, close the upstream Viking WebSocket so all subscriptions are guaranteed to be dropped; the pooled client reconnects on the next request.
+- `trading_enabled` here is only the inverse of the portfolio `disabled` field. It does not imply the robot process or its transaction/market-data connections are currently trading-ready.

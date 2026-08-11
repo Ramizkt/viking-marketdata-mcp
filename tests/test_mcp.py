@@ -15,6 +15,7 @@ async def test_mcp_lists_expected_tools():
         "unsubscribe_available_portfolios",
         "get_portfolio_template",
         "get_current_portfolio_data",
+        "get_robot_portfolio_trading_status",
         "subscribe_portfolio",
         "get_portfolio_updates",
         "unsubscribe_portfolio",
@@ -56,6 +57,8 @@ async def test_mcp_lists_expected_tools():
     assert tools["get_available_portfolio_updates"].annotations.idempotentHint is False
     assert tools["unsubscribe_available_portfolios"].annotations.idempotentHint is False
     assert tools["get_current_portfolio_data"].annotations.idempotentHint is True
+    assert tools["get_robot_portfolio_trading_status"].annotations.idempotentHint is True
+    assert tools["get_robot_portfolio_trading_status"].annotations.readOnlyHint is True
     assert tools["subscribe_portfolio"].annotations.idempotentHint is False
     assert tools["get_portfolio_updates"].annotations.idempotentHint is False
     assert tools["unsubscribe_portfolio"].annotations.idempotentHint is False

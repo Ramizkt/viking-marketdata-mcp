@@ -42,6 +42,9 @@ mcp = FastMCP(
         "Пользователь уже прошёл безопасную браузерную OAuth-авторизацию. Никогда не проси "
         "email или API key в чате. Сначала вызывай list_available_portfolios. "
         "Текущее полное состояние портфеля получай через get_current_portfolio_data. "
+        "Для вопросов о количестве включённых/выключенных портфелей робота или о том, "
+        "какие именно портфели включены, всегда используй get_robot_portfolio_trading_status; "
+        "не делай fan-out из get_current_portfolio_data по каждому портфелю. "
         "Схему и назначение динамических полей получай через get_portfolio_template. "
         "Для исторической выгрузки выбирай портфель с history_available=true; "
         "в get_portfolio_data даты всегда передавай с часовым поясом. "
@@ -189,6 +192,50 @@ async def search_portfolios(
         history_only=history_only,
         limit=limit,
         offset=offset,
+    )
+
+
+@mcp.tool(
+    title="Статус торговли портфелей робота",
+    description=(
+        "Одним read-only MCP-вызовом возвращает robot-wide счётчики p_a/p_d/p_e и точные "
+        "счётчики по портфелям, доступным текущей роли. trading_enabled означает строго "
+        "disabled=false. Для быстрого ответа только по количествам оставь include_items=false. "
+        "Чтобы получить конкретные портфели, установи include_items=true; enabled_only=true "
+        "вернёт только явно включённые. Массовые portfolio.subscribe выполняются внутри сервера "
+        "группами до 50 сообщений, поэтому агент не должен вызывать get_current_portfolio_data "
+        "по каждому портфелю отдельно."
+    ),
+    annotations=READ_ONLY,
+)
+async def get_robot_portfolio_trading_status(
+    robot_id: Annotated[str, Field(min_length=1, description="Идентификатор робота")],
+    include_items: bool = False,
+    enabled_only: bool = False,
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().get_robot_portfolio_trading_status(
+            robot_id=robot_id,
+            include_items=include_items,
+            enabled_only=enabled_only,
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Robot portfolio trading status request failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=(
+                    f"Робот {robot_id}: доступно текущей роли "
+                    f"{result['accessible_total_count']} портфелей; "
+                    f"явно включено {result['accessible_enabled_count']}, "
+                    f"выключено {result['accessible_disabled_count']}, "
+                    f"неизвестно {result['accessible_unknown_count']}."
+                ),
+            )
+        ],
+        structuredContent=result,
     )
 
 

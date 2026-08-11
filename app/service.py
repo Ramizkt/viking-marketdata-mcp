@@ -106,6 +106,147 @@ class MarketDataService:
             limit=limit,
         )
 
+    async def get_robot_portfolio_trading_status(
+        self,
+        *,
+        robot_id: str,
+        include_items: bool = False,
+        enabled_only: bool = False,
+    ) -> dict[str, Any]:
+        if not robot_id:
+            raise ValueError("robot_id must not be empty")
+        if enabled_only and not include_items:
+            raise ValueError("enabled_only=true requires include_items=true")
+
+        robot_summary = await self.client.get_robot_portfolio_summary(robot_id=robot_id)
+        available_rows = await self.client.list_available_portfolios_basic()
+        robot_rows = [row for row in available_rows if row["robot_id"] == robot_id]
+        accessible_total = len(robot_rows)
+        robot_total = robot_summary["all_portfolios"]
+        notes = [
+            "trading_enabled is defined strictly as portfolio snapshot field disabled == false; "
+            "it does not by itself prove that the robot, transaction connection or market-data "
+            "connection is currently trading-ready."
+        ]
+
+        scan_required = include_items or accessible_total != robot_total
+        all_items: list[dict[str, Any]] = []
+        if not scan_required:
+            accessible_enabled = robot_summary["enabled_portfolios"]
+            accessible_disabled = robot_summary["disabled_portfolios"]
+            accessible_unknown = 0
+            detail_source = "robot.subscribe.p_a/p_d"
+            notes.append(
+                "The current role can access every portfolio counted by robot.subscribe, so "
+                "accessible counts were derived from p_a/p_d without per-portfolio reads."
+            )
+            cleanup_reconnected = False
+        else:
+            batch = await self.client.get_current_portfolio_data_many(
+                robot_id=robot_id,
+                portfolios=[row["portfolio"] for row in robot_rows],
+            )
+            by_name = {item["portfolio"]: item for item in batch["items"]}
+            accessible_enabled = 0
+            accessible_disabled = 0
+            accessible_unknown = 0
+            for row in robot_rows:
+                portfolio = row["portfolio"]
+                batch_item = by_name.get(portfolio)
+                item: dict[str, Any] = {
+                    "robot_id": robot_id,
+                    "portfolio": portfolio,
+                    "owner": row["owner"],
+                }
+                if batch_item is None or not batch_item.get("ok"):
+                    accessible_unknown += 1
+                    item.update(
+                        {
+                            "status": "unknown",
+                            "trading_enabled": None,
+                            "disabled": None,
+                            "source": "portfolio.subscribe.value.disabled",
+                        }
+                    )
+                    if batch_item is not None:
+                        item["error_type"] = batch_item.get("error_type")
+                        item["message"] = batch_item.get("message")
+                        if "code" in batch_item:
+                            item["code"] = batch_item["code"]
+                else:
+                    disabled = batch_item["value"].get("disabled")
+                    if isinstance(disabled, bool):
+                        trading_enabled = not disabled
+                        if trading_enabled:
+                            accessible_enabled += 1
+                            status = "enabled"
+                        else:
+                            accessible_disabled += 1
+                            status = "disabled"
+                        item.update(
+                            {
+                                "status": status,
+                                "trading_enabled": trading_enabled,
+                                "disabled": disabled,
+                                "source": "portfolio.subscribe.value.disabled",
+                            }
+                        )
+                    else:
+                        accessible_unknown += 1
+                        item.update(
+                            {
+                                "status": "unknown",
+                                "trading_enabled": None,
+                                "disabled": None,
+                                "source": "portfolio.subscribe.value.disabled",
+                                "reason": "disabled field is missing or is not boolean",
+                            }
+                        )
+                all_items.append(item)
+            detail_source = "batched portfolio.subscribe"
+            cleanup_reconnected = batch["cleanup_reconnected"]
+            if accessible_total != robot_total:
+                notes.append(
+                    "robot.subscribe p_a/p_d are robot-wide counters. Because the current role "
+                    "does not expose the same number of portfolios, accessible counts were "
+                    "computed only from accessible portfolio snapshots."
+                )
+            if cleanup_reconnected:
+                notes.append(
+                    "At least one grouped unsubscribe did not complete cleanly; the Viking "
+                    "WebSocket was closed to guarantee subscription cleanup and will reconnect "
+                    "on the next request."
+                )
+
+        items: list[dict[str, Any]] = []
+        if include_items:
+            items = all_items
+            if enabled_only:
+                items = [item for item in items if item["trading_enabled"] is True]
+
+        return envelope(
+            items,
+            data_status="partially_available" if accessible_unknown else "ok",
+            notes=notes,
+            robot_id=robot_id,
+            robot_total_count=robot_summary["all_portfolios"],
+            robot_enabled_count=robot_summary["enabled_portfolios"],
+            robot_disabled_count=robot_summary["disabled_portfolios"],
+            robot_expired_count=robot_summary["expired_portfolios"],
+            robot_trading_status=robot_summary["robot_trading_status"],
+            robot_trading=robot_summary["robot_trading"],
+            accessible_total_count=accessible_total,
+            accessible_enabled_count=accessible_enabled,
+            accessible_disabled_count=accessible_disabled,
+            accessible_unknown_count=accessible_unknown,
+            include_items=include_items,
+            enabled_only=enabled_only,
+            returned_count=len(items),
+            detail_source=detail_source,
+            grouped_request_max_size=50 if scan_required else None,
+            cleanup_reconnected=cleanup_reconnected,
+        )
+
     async def subscribe_available_portfolios(self) -> dict[str, Any]:
         return await self.client.subscribe_available_portfolios()
 

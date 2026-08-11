@@ -404,3 +404,14 @@ EXPORT_SIGNING_KEY=случайный внутренний секрет
 ## Response contract v2
 
 Исторические сделки, логи и текущий снапшот возвращаются без дублирования в едином массиве `items`. Сырой ответ Viking доступен только при `raw=true`. Ответ содержит `data_status`, `row_count`, `truncated`, `coverage` и `notes`; epoch-nanoseconds сохраняются, рядом добавляется `dt_iso`. Sentinel `-2^53` преобразуется в `null`. Логи по умолчанию выдаются с `verbosity=compact`; `full` нужно запрашивать явно.
+
+
+## Robot portfolio trading status
+
+For questions such as “how many portfolios have trading enabled?” or “which portfolios are enabled?”, use the single read-only MCP tool `get_robot_portfolio_trading_status`. `trading_enabled` is defined strictly as the current portfolio field `disabled == false`.
+
+- `include_items=false` returns counts only. When the current role can access every portfolio counted by `robot.subscribe`, the server derives the counts directly from documented `p_a` (all portfolios) and `p_d` (disabled portfolios), without reading every portfolio.
+- `include_items=true` returns compact per-portfolio statuses. `enabled_only=true` keeps only explicitly enabled portfolios.
+- If access covers only part of a robot, accessible counts are computed from accessible portfolio snapshots; robot-wide `p_a/p_d/p_e` are still returned separately.
+- Mass snapshot reads are performed inside Railway with documented Viking JSON request groups of at most 50 messages, so MCP clients should not fan out `get_current_portfolio_data` once per portfolio.
+- Missing/non-boolean `disabled` values and per-portfolio API errors are reported as `unknown`, never silently treated as disabled.
