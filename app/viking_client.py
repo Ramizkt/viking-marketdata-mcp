@@ -219,7 +219,9 @@ class VikingClient:
                 require_portfolios_add=True,
             )
             if event["portfolios_del"]:
-                raise VikingProtocolError("Initial portfolio snapshot unexpectedly contains portfolios_del")
+                raise VikingProtocolError(
+                    "Initial portfolio snapshot unexpectedly contains portfolios_del"
+                )
             return {"subscription_id": subscription_id, **event}
         except BaseException:
             self._subscriptions.pop(subscription_id, None)
@@ -250,7 +252,9 @@ class VikingClient:
         messages: list[dict[str, Any]] = []
         if wait_seconds and subscription.queue.empty():
             with contextlib.suppress(TimeoutError):
-                messages.append(await asyncio.wait_for(subscription.queue.get(), timeout=wait_seconds))
+                messages.append(
+                    await asyncio.wait_for(subscription.queue.get(), timeout=wait_seconds)
+                )
         while len(messages) < max_events:
             try:
                 messages.append(subscription.queue.get_nowait())
@@ -331,7 +335,9 @@ class VikingClient:
         )
         result = self._required_str(response, "r")
         if result != "p":
-            raise VikingProtocolError("get_template_id returned an unexpected result; expected r='p'")
+            raise VikingProtocolError(
+                "get_template_id returned an unexpected result; expected r='p'"
+            )
         data = self._required_dict(response, "data")
         template_id = self._required_str(data, "template_id")
         return {
@@ -355,7 +361,9 @@ class VikingClient:
         )
         result = self._required_str(response, "r")
         if result != "p":
-            raise VikingProtocolError("get_template_by_id returned an unexpected result; expected r='p'")
+            raise VikingProtocolError(
+                "get_template_by_id returned an unexpected result; expected r='p'"
+            )
         data = self._required_dict(response, "data")
         template = self._required_dict(data, "template")
         template_fields = self._required_dict(template, "template_fields")
@@ -390,7 +398,9 @@ class VikingClient:
             object_id={"r_id": robot_id, "p_id": portfolio},
         )
         requested_template_id = template_id_response["template_id"]
-        template_response = await self.get_template_by_id(template_id=requested_template_id)
+        template_response = await self.get_template_by_id(
+            template_id=requested_template_id
+        )
         return {
             "robot_id": robot_id,
             "portfolio": portfolio,
@@ -530,7 +540,8 @@ class VikingClient:
             }
 
         subscribe_requests = [
-            ("portfolio.subscribe", {"r_id": robot_id, "p_id": portfolio}) for portfolio in portfolios
+            ("portfolio.subscribe", {"r_id": robot_id, "p_id": portfolio})
+            for portfolio in portfolios
         ]
         grouped = await self._grouped_exchange(
             subscribe_requests,
@@ -540,7 +551,9 @@ class VikingClient:
         items: list[dict[str, Any]] = []
         active_subscriptions: list[tuple[str, str]] = []
         try:
-            for portfolio, (subscription_id, outcome) in zip(portfolios, grouped, strict=True):
+            for portfolio, (subscription_id, outcome) in zip(
+                portfolios, grouped, strict=True
+            ):
                 if isinstance(outcome, VikingAPIError):
                     item: dict[str, Any] = {
                         "portfolio": portfolio,
@@ -677,7 +690,9 @@ class VikingClient:
         messages: list[dict[str, Any]] = []
         if wait_seconds and subscription.queue.empty():
             with contextlib.suppress(TimeoutError):
-                messages.append(await asyncio.wait_for(subscription.queue.get(), timeout=wait_seconds))
+                messages.append(
+                    await asyncio.wait_for(subscription.queue.get(), timeout=wait_seconds)
+                )
         while len(messages) < max_events:
             try:
                 messages.append(subscription.queue.get_nowait())
@@ -731,7 +746,9 @@ class VikingClient:
         )
         result = self._required_str(response, "r")
         if result != "p":
-            raise VikingProtocolError("portfolio.unsubscribe returned an unexpected result; expected r='p'")
+            raise VikingProtocolError(
+                "portfolio.unsubscribe returned an unexpected result; expected r='p'"
+            )
         parsed = {
             "subscription_id": subscription_id,
             "type": self._required_str(response, "type"),
@@ -891,7 +908,9 @@ class VikingClient:
         response = await self.request("robot_logs.get_history", request_data)
         result = self._required_str(response, "r")
         if result != "p":
-            raise VikingProtocolError("robot_logs.get_history returned an unexpected result; expected r='p'")
+            raise VikingProtocolError(
+                "robot_logs.get_history returned an unexpected result; expected r='p'"
+            )
         data = self._required_dict(response, "data")
         logs = self._parse_log_rows(
             data.get("values"),
@@ -919,13 +938,17 @@ class VikingClient:
             "logs": logs,
         }
 
-    async def subscribe_portfolio_deals(self, *, robot_id: str, portfolio: str) -> dict[str, Any]:
+    async def subscribe_portfolio_deals(
+        self, *, robot_id: str, portfolio: str
+    ) -> dict[str, Any]:
         """Subscribe to portfolio deals and return the initial snapshot."""
         if not robot_id:
             raise ValueError("robot_id must not be empty")
         if not portfolio:
             raise ValueError("portfolio must not be empty")
-        response = await self._subscribe("portfolio_deals.subscribe", {"r_id": robot_id, "p_id": portfolio})
+        response = await self._subscribe(
+            "portfolio_deals.subscribe", {"r_id": robot_id, "p_id": portfolio}
+        )
         subscription_id = self._required_str(response, "eid")
         try:
             event = self._parse_deal_event(
@@ -972,7 +995,9 @@ class VikingClient:
         messages: list[dict[str, Any]] = []
         if wait_seconds and subscription.queue.empty():
             with contextlib.suppress(TimeoutError):
-                messages.append(await asyncio.wait_for(subscription.queue.get(), timeout=wait_seconds))
+                messages.append(
+                    await asyncio.wait_for(subscription.queue.get(), timeout=wait_seconds)
+                )
         while len(messages) < max_events:
             try:
                 messages.append(subscription.queue.get_nowait())
@@ -1030,17 +1055,24 @@ class VikingClient:
         self._validate_epoch_nsec_bound(before_ns, "before_ns")
         if not 1 <= limit <= 100:
             raise ValueError("limit must be in range 1..100")
-        data: dict[str, Any] = {"r_id": robot_id, "p_id": portfolio, "mt": before_ns, "lim": limit}
+        data: dict[str, Any] = {
+            "r_id": robot_id, "p_id": portfolio, "mt": before_ns, "lim": limit
+        }
         if security_key is not None:
             data["sec_key"] = security_key
         return await self._get_portfolio_deals_response(
-            "portfolio_deals.get_previous", data, robot_id, portfolio, security_key=security_key, limit=limit
+            "portfolio_deals.get_previous", data, robot_id, portfolio,
+            security_key=security_key, limit=limit
         )
 
-    async def get_portfolio_deal_sec_keys(self, *, robot_id: str, portfolio: str) -> dict[str, Any]:
+    async def get_portfolio_deal_sec_keys(
+        self, *, robot_id: str, portfolio: str
+    ) -> dict[str, Any]:
         """Return unique security keys from portfolio deal history."""
         self._validate_deal_request(robot_id, portfolio, None)
-        response = await self.request("portfolio_deals.get_sec_keys", {"r_id": robot_id, "p_id": portfolio})
+        response = await self.request(
+            "portfolio_deals.get_sec_keys", {"r_id": robot_id, "p_id": portfolio}
+        )
         result = self._required_str(response, "r")
         if result != "p":
             raise VikingProtocolError(
@@ -1082,16 +1114,14 @@ class VikingClient:
         if not 1 <= limit <= 100_000:
             raise ValueError("limit must be in range 1..100000")
         data: dict[str, Any] = {
-            "r_id": robot_id,
-            "p_id": portfolio,
-            "mint": mint_ns,
-            "maxt": maxt_ns,
-            "lim": limit,
+            "r_id": robot_id, "p_id": portfolio,
+            "mint": mint_ns, "maxt": maxt_ns, "lim": limit,
         }
         if security_key is not None:
             data["sec_key"] = security_key
         return await self._get_portfolio_deals_response(
-            "portfolio_deals.get_history", data, robot_id, portfolio, security_key=security_key, limit=limit
+            "portfolio_deals.get_history", data, robot_id, portfolio,
+            security_key=security_key, limit=limit
         )
 
     async def get_robot_securities(
@@ -1119,9 +1149,13 @@ class VikingClient:
         subscription = self._subscriptions.get(request_id)
         pages = [first]
         try:
-            while self._required_bool(self._required_dict(pages[-1], "data"), "next"):
+            while self._required_bool(
+                self._required_dict(pages[-1], "data"), "next"
+            ):
                 if subscription is None:
-                    raise VikingProtocolError("robot.get_securities pagination state was lost")
+                    raise VikingProtocolError(
+                        "robot.get_securities pagination state was lost"
+                    )
                 pages.append(
                     await asyncio.wait_for(
                         subscription.queue.get(),
@@ -1143,7 +1177,9 @@ class VikingClient:
                 if not isinstance(security, dict):
                     raise VikingProtocolError(f"Security {key!r} must be an object")
                 if self._required_str(security, "sec_key") != key:
-                    raise VikingProtocolError(f"Security key {key!r} does not match sec_key")
+                    raise VikingProtocolError(
+                        f"Security key {key!r} does not match sec_key"
+                    )
                 securities[key] = dict(security)
         return {
             "type": "robot.get_securities",
@@ -1209,9 +1245,13 @@ class VikingClient:
             raise VikingProtocolError("Unexpected robot.find_security key")
         portfolios = data.get("portfolios")
         formulas = data.get("formulas")
-        if not isinstance(portfolios, list) or not all(isinstance(item, dict) for item in portfolios):
+        if not isinstance(portfolios, list) or not all(
+            isinstance(item, dict) for item in portfolios
+        ):
             raise VikingProtocolError("robot.find_security portfolios must be an array")
-        if not isinstance(formulas, list) or not all(isinstance(item, dict) for item in formulas):
+        if not isinstance(formulas, list) or not all(
+            isinstance(item, dict) for item in formulas
+        ):
             raise VikingProtocolError("robot.find_security formulas must be an array")
         return {
             **parsed,
@@ -1248,7 +1288,9 @@ class VikingClient:
     async def get_all_data_connections(self, *, robot_id: str) -> dict[str, Any]:
         return await self._get_connection_list("data_conn.get_all", robot_id=robot_id)
 
-    async def get_transaction_connection(self, *, robot_id: str, sec_type: int, name: str) -> dict[str, Any]:
+    async def get_transaction_connection(
+        self, *, robot_id: str, sec_type: int, name: str
+    ) -> dict[str, Any]:
         self._validate_connection_identity(robot_id, sec_type, name)
         response = await self.request(
             "trans_conn.get",
@@ -1258,7 +1300,9 @@ class VikingClient:
         data = parsed["data"]
         returned_robot_id = self._required_str(data, "r_id")
         connection = self._required_dict(data, "conn")
-        self._validate_returned_connection(connection, expected_sec_type=sec_type, expected_name=name)
+        self._validate_returned_connection(
+            connection, expected_sec_type=sec_type, expected_name=name
+        )
         if returned_robot_id != robot_id:
             raise VikingProtocolError("Unexpected trans_conn.get r_id")
         return {**parsed, "robot_id": robot_id, "connection": dict(connection)}
@@ -1305,7 +1349,9 @@ class VikingClient:
     async def get_all_transaction_connections(self, *, robot_id: str) -> dict[str, Any]:
         return await self._get_connection_list("trans_conn.get_all", robot_id=robot_id)
 
-    async def unsubscribe_transaction_connections(self, subscription_id: str) -> dict[str, Any]:
+    async def unsubscribe_transaction_connections(
+        self, subscription_id: str
+    ) -> dict[str, Any]:
         return await self._unsubscribe_log_subscription(
             subscription_id,
             expected_subscribe_type="trans_conn.subscribe",
@@ -1357,14 +1403,18 @@ class VikingClient:
             max_events=max_events,
         )
 
-    async def unsubscribe_transaction_positions(self, subscription_id: str) -> dict[str, Any]:
+    async def unsubscribe_transaction_positions(
+        self, subscription_id: str
+    ) -> dict[str, Any]:
         return await self._unsubscribe_log_subscription(
             subscription_id,
             expected_subscribe_type="trans_conn_poses.subscribe",
             unsubscribe_type="trans_conn_poses.unsubscribe",
         )
 
-    async def _get_connection_list(self, message_type: str, *, robot_id: str) -> dict[str, Any]:
+    async def _get_connection_list(
+        self, message_type: str, *, robot_id: str
+    ) -> dict[str, Any]:
         if not robot_id:
             raise ValueError("robot_id must not be empty")
         response = await self.request(message_type, {"r_id": robot_id})
@@ -1392,7 +1442,9 @@ class VikingClient:
             raise ValueError("robot_id must not be empty")
         data: dict[str, Any] = {"r_id": robot_id}
         if connection is not None:
-            self._validate_connection_identity(robot_id, connection.get("sec_type"), connection.get("name"))
+            self._validate_connection_identity(
+                robot_id, connection.get("sec_type"), connection.get("name")
+            )
             data["conn"] = connection
         response = await self._subscribe(message_type, data)
         subscription_id = self._required_str(response, "eid")
@@ -1422,7 +1474,9 @@ class VikingClient:
         if subscription is None or subscription.message_type != expected_type:
             raise ValueError(f"Unknown or inactive {expected_type} subscription_id")
         if subscription.overflowed:
-            raise VikingProtocolError(f"{expected_type} subscription buffer overflowed and events were lost")
+            raise VikingProtocolError(
+                f"{expected_type} subscription buffer overflowed and events were lost"
+            )
         if not 0 <= wait_seconds <= 30:
             raise ValueError("wait_seconds must be in range 0..30")
         if not 1 <= max_events <= 500:
@@ -1431,7 +1485,9 @@ class VikingClient:
         messages: list[dict[str, Any]] = []
         if wait_seconds and subscription.queue.empty():
             with contextlib.suppress(TimeoutError):
-                messages.append(await asyncio.wait_for(subscription.queue.get(), timeout=wait_seconds))
+                messages.append(
+                    await asyncio.wait_for(subscription.queue.get(), timeout=wait_seconds)
+                )
         while len(messages) < max_events:
             try:
                 messages.append(subscription.queue.get_nowait())
@@ -1470,7 +1526,9 @@ class VikingClient:
         expected_robot_id: str,
         expected_connection: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        cls._validate_response_identity(response, expected_type=expected_type, expected_eid=subscription_id)
+        cls._validate_response_identity(
+            response, expected_type=expected_type, expected_eid=subscription_id
+        )
         result = cls._required_str(response, "r")
         if result not in {"s", "u"}:
             raise VikingProtocolError(f"{expected_type} returned unexpected r={result!r}")
@@ -1501,11 +1559,15 @@ class VikingClient:
         }
 
     @classmethod
-    def _parse_plain_response(cls, response: dict[str, Any], expected_type: str) -> dict[str, Any]:
+    def _parse_plain_response(
+        cls, response: dict[str, Any], expected_type: str
+    ) -> dict[str, Any]:
         cls._validate_response_identity(response, expected_type=expected_type)
         result = cls._required_str(response, "r")
         if result != "p":
-            raise VikingProtocolError(f"{expected_type} returned an unexpected result; expected r='p'")
+            raise VikingProtocolError(
+                f"{expected_type} returned an unexpected result; expected r='p'"
+            )
         return {
             "type": expected_type,
             "eid": cls._required_str(response, "eid"),
@@ -1522,9 +1584,13 @@ class VikingClient:
                 raise VikingProtocolError(f"Connection {key!r} must be an object")
             sec_type = connection.get("sec_type")
             name = connection.get("name")
-            cls._validate_returned_connection(connection, expected_sec_type=sec_type, expected_name=name)
+            cls._validate_returned_connection(
+                connection, expected_sec_type=sec_type, expected_name=name
+            )
             if key != f"{sec_type}_{name}":
-                raise VikingProtocolError(f"Connection key {key!r} does not match sec_type + '_' + name")
+                raise VikingProtocolError(
+                    f"Connection key {key!r} does not match sec_type + '_' + name"
+                )
 
     @classmethod
     def _validate_returned_connection(
@@ -1562,13 +1628,13 @@ class VikingClient:
         response = await self.request(message_type, request_data)
         result = self._required_str(response, "r")
         if result != "p":
-            raise VikingProtocolError(f"{message_type} returned an unexpected result; expected r='p'")
+            raise VikingProtocolError(
+                f"{message_type} returned an unexpected result; expected r='p'"
+            )
         data = self._required_dict(response, "data")
         deals = self._parse_deal_rows(
-            data.get("values"),
-            expected_robot_id=robot_id,
-            expected_portfolio=portfolio,
-            expected_security_key=security_key,
+            data.get("values"), expected_robot_id=robot_id,
+            expected_portfolio=portfolio, expected_security_key=security_key
         )
         return {
             "type": self._required_str(response, "type"),
@@ -1586,7 +1652,9 @@ class VikingClient:
         }
 
     @staticmethod
-    def _validate_deal_request(robot_id: str, portfolio: str, security_key: str | None) -> None:
+    def _validate_deal_request(
+        robot_id: str, portfolio: str, security_key: str | None
+    ) -> None:
         if not robot_id:
             raise ValueError("robot_id must not be empty")
         if not portfolio:
@@ -1709,7 +1777,9 @@ class VikingClient:
 
         outcomes: list[tuple[str, dict[str, Any] | VikingAPIError]] = []
         try:
-            for (eid, message_type, _, _, _), response in zip(records, responses, strict=True):
+            for (eid, message_type, _, _, _), response in zip(
+                records, responses, strict=True
+            ):
                 self._validate_response_identity(
                     response,
                     expected_type=message_type,
@@ -1876,12 +1946,16 @@ class VikingClient:
                     if future is not None and not future.done():
                         future.set_result(message)
                         continue
-                    subscription = self._subscriptions.get(str(eid)) if eid is not None else None
+                    subscription = (
+                        self._subscriptions.get(str(eid)) if eid is not None else None
+                    )
                     if subscription is not None:
                         if subscription.queue.full():
                             subscription.queue.get_nowait()
                             subscription.overflowed = True
-                            logger.warning("Dropped oldest buffered event for subscription %s", eid)
+                            logger.warning(
+                                "Dropped oldest buffered event for subscription %s", eid
+                            )
                         subscription.queue.put_nowait(message)
         except asyncio.CancelledError:
             failure = ConnectionError("Viking WebSocket reader cancelled")
@@ -1938,13 +2012,17 @@ class VikingClient:
         expected_portfolio = request_data.get("p_id")
         if not isinstance(expected_robot_id, str):
             raise VikingProtocolError("Log subscription metadata is missing r_id")
-        if expected_type == "portfolio_logs.subscribe" and not isinstance(expected_portfolio, str):
+        if expected_type == "portfolio_logs.subscribe" and not isinstance(
+            expected_portfolio, str
+        ):
             raise VikingProtocolError("Portfolio-log subscription metadata is missing p_id")
 
         messages: list[dict[str, Any]] = []
         if wait_seconds and subscription.queue.empty():
             with contextlib.suppress(TimeoutError):
-                messages.append(await asyncio.wait_for(subscription.queue.get(), timeout=wait_seconds))
+                messages.append(
+                    await asyncio.wait_for(subscription.queue.get(), timeout=wait_seconds)
+                )
         while len(messages) < max_events:
             try:
                 messages.append(subscription.queue.get_nowait())
@@ -2008,7 +2086,9 @@ class VikingClient:
         self._validate_response_identity(response, expected_type=unsubscribe_type)
         result = self._required_str(response, "r")
         if result != "p":
-            raise VikingProtocolError(f"{unsubscribe_type} returned an unexpected result; expected r='p'")
+            raise VikingProtocolError(
+                f"{unsubscribe_type} returned an unexpected result; expected r='p'"
+            )
         parsed = {
             "subscription_id": subscription_id,
             "type": self._required_str(response, "type"),
@@ -2039,10 +2119,14 @@ class VikingClient:
         result = []
         for index, row in enumerate(value):
             if not isinstance(row, list) or len(row) != 3:
-                raise VikingProtocolError(f"{field_name}[{index}] must contain robot_id, portfolio and owner")
+                raise VikingProtocolError(
+                    f"{field_name}[{index}] must contain robot_id, portfolio and owner"
+                )
             if not all(isinstance(item, str) for item in row):
                 raise VikingProtocolError(f"{field_name}[{index}] fields must be strings")
-            result.append({"robot_id": row[0], "portfolio": row[1], "owner": row[2]})
+            result.append(
+                {"robot_id": row[0], "portfolio": row[1], "owner": row[2]}
+            )
         return result
 
     @classmethod
@@ -2105,7 +2189,9 @@ class VikingClient:
         result = cls._required_str(response, "r")
         if result not in allowed_results:
             expected = ", ".join(repr(item) for item in sorted(allowed_results))
-            raise VikingProtocolError(f"Portfolio response has unexpected r={result!r}; expected {expected}")
+            raise VikingProtocolError(
+                f"Portfolio response has unexpected r={result!r}; expected {expected}"
+            )
 
         source_data = cls._required_dict(response, "data")
         robot_id = cls._required_str(source_data, "r_id")
@@ -2122,7 +2208,9 @@ class VikingClient:
         value = cls._required_dict(source_data, "value")
         name = cls._required_str(value, "name")
         if name != portfolio:
-            raise VikingProtocolError(f"Portfolio snapshot name {name!r} does not match p_id {portfolio!r}")
+            raise VikingProtocolError(
+                f"Portfolio snapshot name {name!r} does not match p_id {portfolio!r}"
+            )
 
         action = value.get("__action")
         if action is not None and action != "del":
@@ -2137,15 +2225,20 @@ class VikingClient:
                 raise VikingProtocolError("Portfolio securities must be an object")
             for security_key, security in securities.items():
                 if not isinstance(security, dict):
-                    raise VikingProtocolError(f"Portfolio security {security_key!r} must be an object")
+                    raise VikingProtocolError(
+                        f"Portfolio security {security_key!r} must be an object"
+                    )
                 sec_key = cls._required_str(security, "sec_key")
                 if sec_key != security_key:
                     raise VikingProtocolError(
-                        f"Portfolio security key {security_key!r} does not match sec_key {sec_key!r}"
+                        f"Portfolio security key {security_key!r} does not match "
+                        f"sec_key {sec_key!r}"
                     )
                 security_action = security.get("__action")
                 if security_action is not None and security_action != "del":
-                    raise VikingProtocolError(f"Portfolio security {security_key!r} __action must be 'del'")
+                    raise VikingProtocolError(
+                        f"Portfolio security {security_key!r} __action must be 'del'"
+                    )
 
         data = dict(source_data)
         data["value"] = dict(value)
@@ -2189,7 +2282,9 @@ class VikingClient:
         source_data = cls._required_dict(response, "data")
         robot_id = cls._required_str(source_data, "r_id")
         if robot_id != expected_robot_id:
-            raise VikingProtocolError(f"Unexpected log r_id {robot_id!r}; expected {expected_robot_id!r}")
+            raise VikingProtocolError(
+                f"Unexpected log r_id {robot_id!r}; expected {expected_robot_id!r}"
+            )
 
         portfolio: str | None = None
         if expected_portfolio is not None:
@@ -2249,7 +2344,9 @@ class VikingClient:
         )
         result = cls._required_str(response, "r")
         if result not in allowed_results:
-            raise VikingProtocolError(f"portfolio_deals.subscribe returned unexpected r={result!r}")
+            raise VikingProtocolError(
+                f"portfolio_deals.subscribe returned unexpected r={result!r}"
+            )
         source_data = cls._required_dict(response, "data")
         robot_id = cls._required_str(source_data, "r_id")
         portfolio = cls._required_str(source_data, "p_id")
@@ -2299,28 +2396,33 @@ class VikingClient:
                 cls._required_str(item, field)
             ono = item.get("ono")
             if isinstance(ono, bool) or not isinstance(ono, (str, int)):
-                raise VikingProtocolError(f"Deal values[{index}].ono must be a string or integer")
+                raise VikingProtocolError(
+                    f"Deal values[{index}].ono must be a string or integer"
+                )
             cls._required_epoch_nsec(item, "dt")
             for field in (
-                "price",
-                "orig_price",
-                "buy_sell",
-                "quantity",
-                "decimals",
-                "curpos",
-                "lot_size",
+                "price", "orig_price", "buy_sell", "quantity",
+                "decimals", "curpos", "lot_size",
             ):
                 value_ = item.get(field)
                 if isinstance(value_, bool) or not isinstance(value_, (int, float)):
-                    raise VikingProtocolError(f"Deal values[{index}].{field} must be a number")
+                    raise VikingProtocolError(
+                        f"Deal values[{index}].{field} must be a number"
+                    )
             row_robot_id = item.get("r_id")
             if row_robot_id is not None and row_robot_id != expected_robot_id:
-                raise VikingProtocolError(f"Unexpected deal values[{index}].r_id {row_robot_id!r}")
+                raise VikingProtocolError(
+                    f"Unexpected deal values[{index}].r_id {row_robot_id!r}"
+                )
             name = item.get("name")
             if name is not None and name != expected_portfolio:
-                raise VikingProtocolError(f"Unexpected deal values[{index}].name {name!r}")
+                raise VikingProtocolError(
+                    f"Unexpected deal values[{index}].name {name!r}"
+                )
             if expected_security_key is not None and item["sec"] != expected_security_key:
-                raise VikingProtocolError(f"Unexpected deal values[{index}].sec {item['sec']!r}")
+                raise VikingProtocolError(
+                    f"Unexpected deal values[{index}].sec {item['sec']!r}"
+                )
             deals.append(dict(item))
         return deals
 
@@ -2353,14 +2455,20 @@ class VikingClient:
                 raise VikingProtocolError(f"Log values[{index}].id must be a string")
             owner = item.get("owner")
             if owner is not None and not isinstance(owner, str):
-                raise VikingProtocolError(f"Log values[{index}].owner must be a string or null")
+                raise VikingProtocolError(
+                    f"Log values[{index}].owner must be a string or null"
+                )
 
             row_robot_id = item.get("r_id")
             if require_row_robot_id and not isinstance(row_robot_id, str):
-                raise VikingProtocolError(f"Log values[{index}].r_id must be a string")
+                raise VikingProtocolError(
+                    f"Log values[{index}].r_id must be a string"
+                )
             if row_robot_id is not None:
                 if not isinstance(row_robot_id, str):
-                    raise VikingProtocolError(f"Log values[{index}].r_id must be a string")
+                    raise VikingProtocolError(
+                        f"Log values[{index}].r_id must be a string"
+                    )
                 if row_robot_id != expected_robot_id:
                     raise VikingProtocolError(
                         f"Unexpected log values[{index}].r_id {row_robot_id!r}; "
@@ -2369,12 +2477,17 @@ class VikingClient:
 
             name = item.get("name")
             if require_name and not isinstance(name, str):
-                raise VikingProtocolError(f"Log values[{index}].name must be a string")
+                raise VikingProtocolError(
+                    f"Log values[{index}].name must be a string"
+                )
             if name is not None and not isinstance(name, str):
-                raise VikingProtocolError(f"Log values[{index}].name must be a string")
+                raise VikingProtocolError(
+                    f"Log values[{index}].name must be a string"
+                )
             if expected_portfolio is not None and name not in {None, expected_portfolio}:
                 raise VikingProtocolError(
-                    f"Unexpected log values[{index}].name {name!r}; expected {expected_portfolio!r}"
+                    f"Unexpected log values[{index}].name {name!r}; "
+                    f"expected {expected_portfolio!r}"
                 )
             logs.append(dict(item))
         return logs
@@ -2403,7 +2516,9 @@ class VikingClient:
     def _raise_api_error(cls, response: dict[str, Any]) -> None:
         result = cls._required_str(response, "r")
         if result != "e":
-            raise VikingProtocolError(f"Cannot parse a non-error response as an API error: r={result!r}")
+            raise VikingProtocolError(
+                f"Cannot parse a non-error response as an API error: r={result!r}"
+            )
         cls._required_int(response, "ts")
         error = cls._required_dict(response, "data")
         raise VikingAPIError(

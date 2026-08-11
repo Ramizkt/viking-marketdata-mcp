@@ -105,7 +105,9 @@ async def test_mcp_lists_expected_tools():
     assert "такую запись также не исключай" in instructions
     history_schema = tools["get_robot_log_history"].inputSchema["properties"]
     message_filter_string = next(
-        option for option in history_schema["message_filter"]["anyOf"] if option.get("type") == "string"
+        option
+        for option in history_schema["message_filter"]["anyOf"]
+        if option.get("type") == "string"
     )
     assert message_filter_string["maxLength"] == 256
     assert history_schema["limit"]["minimum"] == 1
@@ -143,7 +145,9 @@ async def test_mcp_portfolio_tool_returns_structured_content(monkeypatch):
 
 async def test_mcp_current_portfolio_data_returns_all_fields(monkeypatch):
     class FakeService:
-        async def get_current_portfolio_data(self, *, robot_id: str, portfolio: str, raw: bool = False):
+        async def get_current_portfolio_data(
+            self, *, robot_id: str, portfolio: str, raw: bool = False
+        ):
             return {
                 "data_status": "ok",
                 "row_count": 1,
@@ -205,7 +209,9 @@ async def test_mcp_portfolio_template_returns_complete_schema(monkeypatch):
 
     monkeypatch.setattr(main, "_service_for_request", lambda: FakeService())
 
-    async with create_connected_server_and_client_session(main.mcp, raise_exceptions=True) as session:
+    async with create_connected_server_and_client_session(
+        main.mcp, raise_exceptions=True
+    ) as session:
         result = await session.call_tool(
             "get_portfolio_template",
             {"robot_id": "1", "portfolio": "demo"},
@@ -213,7 +219,9 @@ async def test_mcp_portfolio_template_returns_complete_schema(monkeypatch):
 
     assert result.isError is False
     assert result.structuredContent["template_id"] == "portfolio_viking_base"
-    assert result.structuredContent["template_fields"]["custom_group"] == [{"field": "custom"}]
+    assert result.structuredContent["template_fields"]["custom_group"] == [
+        {"field": "custom"}
+    ]
 
 
 async def test_mcp_subscribe_portfolio_logs_returns_complete_snapshot(monkeypatch):
@@ -239,7 +247,9 @@ async def test_mcp_subscribe_portfolio_logs_returns_complete_snapshot(monkeypatc
 
     monkeypatch.setattr(main, "_service_for_request", lambda: FakeService())
 
-    async with create_connected_server_and_client_session(main.mcp, raise_exceptions=True) as session:
+    async with create_connected_server_and_client_session(
+        main.mcp, raise_exceptions=True
+    ) as session:
         result = await session.call_tool(
             "subscribe_portfolio_logs",
             {"robot_id": "1", "portfolio": "demo"},
@@ -287,7 +297,9 @@ async def test_mcp_robot_log_history_returns_structured_content(monkeypatch):
 
     monkeypatch.setattr(main, "_service_for_request", lambda: FakeService())
 
-    async with create_connected_server_and_client_session(main.mcp, raise_exceptions=True) as session:
+    async with create_connected_server_and_client_session(
+        main.mcp, raise_exceptions=True
+    ) as session:
         result = await session.call_tool(
             "get_robot_log_history",
             {
