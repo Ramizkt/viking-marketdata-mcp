@@ -1,0 +1,109 @@
+name: Apply direct read-only MCP rule
+
+on:
+  push:
+    branches:
+      - agent/direct-readonly-mcp-no-subagent
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v7
+        with:
+          ref: agent/direct-readonly-mcp-no-subagent
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Apply direct read-only rule
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('app/main.py')
+          text = path.read_text()
+          old = (
+              '        "Пользователь уже прошёл безопасную браузерную OAuth-авторизацию. Никогда не проси "\n'
+              '        "email или API key в чате. Сначала вызывай list_available_portfolios. "\n'
+          )
+          new = (
+              '        "Пользователь уже прошёл безопасную браузерную OAuth-авторизацию. Никогда не проси "\n'
+              '        "email или API key в чате. "\n'
+              '        "Если задача может быть выполнена одним или несколькими read-only инструментами этого MCP, "\n'
+              '        "вызывай их напрямую в текущем агенте. Не создавай subagent или дочерний Codex и не запускай "\n'
+              '        "codex exec, Terminal или shell только для проксирования этих MCP-вызовов. Multi-agent допустим "\n'
+              '        "только для самостоятельной работы, которая не является обёрткой над read-only MCP. "\n'
+              '        "Сначала вызывай list_available_portfolios. "\n'
+          )
+          if old not in text:
+              raise SystemExit('main.py instruction anchor not found')
+          path.write_text(text.replace(old, new, 1))
+
+          path = Path('tests/test_mcp.py')
+          text = path.read_text()
+          old = (
+              '    assert "такую запись также не исключай" in instructions\n'
+              '    history_schema = tools["get_robot_log_history"].inputSchema["properties"]\n'
+          )
+          new = (
+              '    assert "такую запись также не исключай" in instructions\n'
+              '    assert "read-only инструментами этого MCP" in instructions\n'
+              '    assert "вызывай их напрямую в текущем агенте" in instructions\n'
+              '    assert "Не создавай subagent или дочерний Codex" in instructions\n'
+              '    assert "codex exec, Terminal или shell" in instructions\n'
+              '    assert all(\n'
+              '        tool.annotations is not None and tool.annotations.readOnlyHint is True\n'
+              '        for tool in tools.values()\n'
+              '    )\n'
+              '    history_schema = tools["get_robot_log_history"].inputSchema["properties"]\n'
+          )
+          if old not in text:
+              raise SystemExit('test_mcp.py instruction anchor not found')
+          path.write_text(text.replace(old, new, 1))
+
+          path = Path('AGENTS.md')
+          text = path.read_text()
+          old = (
+              '`MCP tool -> MarketDataService -> VikingClient -> wss://bot.fkviking.com/ws`.\n\n'
+              'Для каждого набора пользовательских Viking credentials пул переиспользует одно\n'
+          )
+          new = (
+              '`MCP tool -> MarketDataService -> VikingClient -> wss://bot.fkviking.com/ws`.\n\n'
+              '### Прямое выполнение read-only MCP-запросов\n\n'
+              'Все инструменты этого MCP являются read-only. Если пользовательская задача может быть\n'
+              'выполнена одним или несколькими инструментами Viking MCP, агент должен вызывать их\n'
+              'напрямую в текущем агенте. Нельзя создавать subagent/дочерний Codex и нельзя запускать\n'
+              '`codex exec`, Terminal, shell или другую локальную команду только как прокси для этих\n'
+              'MCP-вызовов. Такой обход превращает обычное чтение через MCP в shell execution и может\n'
+              'вызвать лишний запрос подтверждения у пользователя.\n\n'
+              'Это правило не отключает multi-agent глобально: subagent допустим для самостоятельной\n'
+              'аналитической или кодовой работы, но не как обёртка над read-only Viking MCP.\n\n'
+              'Для каждого набора пользовательских Viking credentials пул переиспользует одно\n'
+          )
+          if old not in text:
+              raise SystemExit('AGENTS.md architecture anchor not found')
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+      - name: Validate
+        run: |
+          uv run ruff check app tests
+          uv run pytest
+
+      - name: Commit rule
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/main.py tests/test_mcp.py AGENTS.md
+          git commit -m "fix: call read-only MCP tools directly"
+          git push
