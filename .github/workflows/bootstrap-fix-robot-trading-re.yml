@@ -73,8 +73,9 @@ jobs:
                   lines[i] = '    ' + lines[i]
           p.write_text('\n'.join(lines) + '\n')
           PY
-      - name: Test
+      - name: Test and lint
         run: |
+          uv run ruff format app/viking_client.py app/service.py app/main.py tests/test_robot_portfolio_trading_status.py tests/test_mcp.py
           uv run pytest tests/test_robot_portfolio_trading_status.py tests/test_mcp.py
           uv run ruff check app/viking_client.py app/service.py app/main.py tests/test_robot_portfolio_trading_status.py tests/test_mcp.py
       - name: Commit normal project files
