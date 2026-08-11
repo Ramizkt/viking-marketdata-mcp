@@ -2,7 +2,7 @@ name: Bootstrap robot trading status fix
 
 on:
   pull_request:
-    types: [opened, reopened]
+    types: [synchronize]
 
 permissions:
   contents: write
@@ -15,19 +15,30 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
-      - name: Enable one-shot push workflow
+      - uses: astral-sh/setup-uv@v7
+      - name: Apply implementation from one-shot workflow
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
-          p = Path('.github/workflows/fix-robot-trading-re.yml')
-          text = p.read_text()
-          text = text.replace("    if: github.actor != 'github-actions[bot]'\n", "")
-          p.write_text(text)
+          text = Path('.github/workflows/fix-robot-trading-re.yml').read_text()
+          start_token = "          python - <<'PY'\n"
+          end_token = "\n          PY\n      - name: Test"
+          start = text.index(start_token) + len(start_token)
+          end = text.index(end_token, start)
+          source = text[start:end]
+          source = '\n'.join(line[10:] if line.startswith('          ') else line for line in source.splitlines())
+          exec(compile(source, '<robot-trading-fix>', 'exec'))
           PY
-          rm .github/workflows/bootstrap-fix-robot-trading-re.yml
+      - name: Test
+        run: |
+          uv run pytest tests/test_robot_portfolio_trading_status.py tests/test_mcp.py
+          uv run ruff check app/viking_client.py app/service.py app/main.py tests/test_robot_portfolio_trading_status.py tests/test_mcp.py
+      - name: Commit normal project files
+        shell: bash
+        run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .github/workflows/fix-robot-trading-re.yml .github/workflows/bootstrap-fix-robot-trading-re.yml
-          git commit -m "chore: trigger robot trading status fix"
+          git add AGENTS.md README.md app/main.py app/service.py app/viking_client.py tests/test_mcp.py tests/test_robot_portfolio_trading_status.py
+          git commit -m "fix: derive portfolio trading from robot re flags"
           git push
