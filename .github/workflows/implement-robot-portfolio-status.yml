@@ -50,6 +50,7 @@ jobs:
           Path('.tmp_implement_robot_status.py').write_text('\n'.join(normalized) + '\n', encoding='utf-8')
           PY
           python .tmp_implement_robot_status.py
+          rm .tmp_implement_robot_status.py
       - name: Verify
         shell: bash
         run: |
@@ -61,7 +62,8 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm .github/workflows/implement-robot-portfolio-status.yml .tmp_implement_robot_status.py
+          git rm .github/workflows/implement-robot-portfolio-status.yml
+          git add -u .tmp_implement_robot_status.py
           git add app/viking_client.py app/service.py app/main.py tests/test_robot_portfolio_trading_status.py README.md AGENTS.md
           git commit -m "feat: add robot portfolio trading status aggregate"
           git push origin HEAD:agent/robot-portfolio-trading-status
