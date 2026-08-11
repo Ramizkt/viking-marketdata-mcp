@@ -1,0 +1,485 @@
+name: Apply robot trading status fix
+
+on:
+  push:
+    branches:
+      - agent/fix-robot-trading-re
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Patch implementation and tests
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_between(path: str, start_marker: str, end_marker: str, replacement: str) -> None:
+              p = Path(path)
+              text = p.read_text()
+              start = text.index(start_marker)
+              end = text.index(end_marker, start)
+              p.write_text(text[:start] + replacement.rstrip() + "\n\n" + text[end:])
+
+          replace_between(
+              "app/viking_client.py",
+              "    async def get_robot_portfolio_summary(",
+              "    async def get_current_portfolio_data_many(",
+              '''    async def get_robot_portfolio_summary(self, *, robot_id: str) -> dict[str, Any]:
+              """Return portfolio trading flags from one robot.subscribe snapshot."""
+              if not robot_id:
+                  raise ValueError("robot_id must not be empty")
+              response = await self._subscribe("robot.subscribe", {"r_id": robot_id})
+              subscription_id = self._required_str(response, "eid")
+              try:
+                  self._validate_response_identity(
+                      response,
+                      expected_type="robot.subscribe",
+                      expected_eid=subscription_id,
+                  )
+                  result = self._required_str(response, "r")
+                  if result != "s":
+                      raise VikingProtocolError(
+                          "robot.subscribe returned an unexpected result; expected r='s'"
+                      )
+                  data = self._required_dict(response, "data")
+                  if self._required_str(data, "r_id") != robot_id:
+                      raise VikingProtocolError("Unexpected robot.subscribe r_id")
+                  value = self._required_dict(data, "value")
+                  all_portfolios = self._required_int(value, "p_a")
+                  disabled_portfolios = self._required_int(value, "p_d")
+                  expired_portfolios = self._required_int(value, "p_e")
+                  trading_status = self._required_int(value, "tr")
+                  if all_portfolios < 0:
+                      raise VikingProtocolError("robot.subscribe p_a must be non-negative")
+                  if not 0 <= disabled_portfolios <= all_portfolios:
+                      raise VikingProtocolError("robot.subscribe p_d must be in range 0..p_a")
+                  if expired_portfolios < 0:
+                      raise VikingProtocolError("robot.subscribe p_e must be non-negative")
+                  if trading_status not in {0, 2, 3}:
+                      raise VikingProtocolError("robot.subscribe tr must be 0, 2 or 3")
+
+                  raw_portfolios = value.get("re")
+                  if not isinstance(raw_portfolios, list):
+                      raise VikingProtocolError("robot.subscribe value.re must be an array")
+                  portfolio_statuses: list[dict[str, Any]] = []
+                  seen_names: set[str] = set()
+                  for index, row in enumerate(raw_portfolios):
+                      if not isinstance(row, dict):
+                          raise VikingProtocolError(
+                              f"robot.subscribe value.re[{index}] must be an object"
+                          )
+                      name = self._required_str(row, "n")
+                      free_or_active_orders = row.get("f")
+                      re_flag = row.get("re")
+                      if not isinstance(free_or_active_orders, bool):
+                          raise VikingProtocolError(
+                              f"robot.subscribe value.re[{index}].f must be boolean"
+                          )
+                      if not isinstance(re_flag, bool):
+                          raise VikingProtocolError(
+                              f"robot.subscribe value.re[{index}].re must be boolean"
+                          )
+                      if name in seen_names:
+                          raise VikingProtocolError(
+                              f"robot.subscribe value.re contains duplicate portfolio {name!r}"
+                          )
+                      seen_names.add(name)
+                      portfolio_statuses.append(
+                          {
+                              "portfolio": name,
+                              "trading": re_flag,
+                              "status": "trading" if re_flag else "not_trading",
+                              "re": re_flag,
+                              "f": free_or_active_orders,
+                          }
+                      )
+                  trading_portfolios = sum(
+                      1 for item in portfolio_statuses if item["trading"] is True
+                  )
+              except BaseException:
+                  self._subscriptions.pop(subscription_id, None)
+                  await self.close()
+                  raise
+
+              try:
+                  await self._unsubscribe_log_subscription(
+                      subscription_id,
+                      expected_subscribe_type="robot.subscribe",
+                      unsubscribe_type="robot.unsubscribe",
+                  )
+              except BaseException:
+                  self._subscriptions.pop(subscription_id, None)
+                  await self.close()
+                  raise
+
+              return {
+                  "robot_id": robot_id,
+                  "all_portfolios": all_portfolios,
+                  "disabled_portfolios": disabled_portfolios,
+                  "expired_portfolios": expired_portfolios,
+                  "robot_trading_status": trading_status,
+                  "robot_trading": (
+                      False if trading_status == 0 else True if trading_status == 2 else None
+                  ),
+                  "portfolio_status_count": len(portfolio_statuses),
+                  "trading_portfolios": trading_portfolios,
+                  "not_trading_portfolios": len(portfolio_statuses) - trading_portfolios,
+                  "portfolio_statuses": portfolio_statuses,
+                  "subscription_closed": True,
+              }''',
+          )
+
+          replace_between(
+              "app/service.py",
+              "    async def get_robot_portfolio_trading_status(",
+              "    async def subscribe_available_portfolios(",
+              '''    async def get_robot_portfolio_trading_status(
+              self,
+              *,
+              robot_id: str,
+              trading_only: bool = False,
+          ) -> dict[str, Any]:
+              if not robot_id:
+                  raise ValueError("robot_id must not be empty")
+
+              robot_summary = await self.client.get_robot_portfolio_summary(robot_id=robot_id)
+              all_items = [dict(item) for item in robot_summary["portfolio_statuses"]]
+              items = all_items
+              if trading_only:
+                  items = [item for item in items if item["trading"] is True]
+
+              notes = [
+                  "Portfolio trading status is derived only from robot.subscribe value.re[].re: "
+                  "true means re_sell or re_buy is true. portfolio.disabled is not used."
+              ]
+              if robot_summary["portfolio_status_count"] != robot_summary["all_portfolios"]:
+                  notes.append(
+                      "robot.subscribe p_a and the number of entries in value.re differ; p_a is "
+                      "reported separately, while per-portfolio trading classification follows "
+                      "the documented value.re array."
+                  )
+
+              return envelope(
+                  items,
+                  notes=notes,
+                  robot_id=robot_id,
+                  robot_total_count=robot_summary["all_portfolios"],
+                  portfolio_status_count=robot_summary["portfolio_status_count"],
+                  trading_count=robot_summary["trading_portfolios"],
+                  not_trading_count=robot_summary["not_trading_portfolios"],
+                  robot_disabled_count=robot_summary["disabled_portfolios"],
+                  robot_expired_count=robot_summary["expired_portfolios"],
+                  robot_trading_status=robot_summary["robot_trading_status"],
+                  robot_trading=robot_summary["robot_trading"],
+                  trading_only=trading_only,
+                  returned_count=len(items),
+                  detail_source="robot.subscribe.value.re",
+                  portfolio_trading_rule="re == true (re_sell or re_buy)",
+                  per_portfolio_reads=0,
+              )''',
+          )
+
+          replace_between(
+              "app/main.py",
+              "@mcp.tool(\n    title=\"Статус торговли портфелей робота\"",
+              "@mcp.tool(\n    title=\"Подписаться на доступные портфели\"",
+              '''@mcp.tool(
+              title="Статус торговли портфелей робота",
+              description=(
+                  "Получает весь список статусов портфелей одним snapshot robot.subscribe и определяет "
+                  "торговлю только по documented value.re[].re: re=true означает, что у портфеля "
+                  "re_sell или re_buy включён. Поле portfolio.disabled для этого ответа не используется. "
+                  "Возвращает каждый портфель со status=trading/not_trading и общие счётчики. "
+                  "trading_only=true оставляет только торгующиеся портфели. Никаких отдельных "
+                  "portfolio.subscribe по портфелям инструмент не делает."
+              ),
+              annotations=READ_ONLY,
+          )
+          async def get_robot_portfolio_trading_status(
+              robot_id: Annotated[str, Field(min_length=1, description="Идентификатор робота")],
+              trading_only: bool = False,
+          ) -> CallToolResult:
+              try:
+                  result = await _service_for_request().get_robot_portfolio_trading_status(
+                      robot_id=robot_id,
+                      trading_only=trading_only,
+                  )
+              except SUBSCRIPTION_ERRORS as exc:
+                  logger.warning("Robot portfolio trading status request failed: %s", exc)
+                  return _error_result(exc)
+              return CallToolResult(
+                  content=[
+                      TextContent(
+                          type="text",
+                          text=(
+                              f"Робот {robot_id}: торгуется {result['trading_count']} портфелей, "
+                              f"не торгуется {result['not_trading_count']}; "
+                              f"получено статусов {result['portfolio_status_count']}."
+                          ),
+                      )
+                  ],
+                  structuredContent=result,
+              )''',
+          )
+
+          p = Path("app/main.py")
+          text = p.read_text()
+          old = (
+              '        "Для вопросов о количестве включённых/выключенных портфелей робота или о том, "\n'
+              '        "какие именно портфели включены, всегда используй get_robot_portfolio_trading_status; "\n'
+              '        "не делай fan-out из get_current_portfolio_data по каждому портфелю. "\n'
+          )
+          new = (
+              '        "Для вопросов о том, какие портфели робота торгуются или не торгуются, всегда "\n'
+              '        "используй get_robot_portfolio_trading_status: статус определяется только по "\n'
+              '        "robot.subscribe value.re[].re, где true означает re_sell или re_buy. Не используй "\n'
+              '        "portfolio.disabled и не делай portfolio.subscribe по каждому портфелю. "\n'
+          )
+          if old not in text:
+              raise SystemExit("main instructions block not found")
+          p.write_text(text.replace(old, new, 1))
+
+          p = Path("README.md")
+          text = p.read_text()
+          marker = "## Robot portfolio trading status\n"
+          start = text.index(marker)
+          p.write_text(text[:start] + '''## Robot portfolio trading status
+
+Для вопросов «какие портфели торгуются?» и «какие не торгуются?» используется один read-only MCP-инструмент `get_robot_portfolio_trading_status`.
+
+- Источник статуса — только snapshot `robot.subscribe`, массив `value.re`.
+- Для каждого элемента `n` — имя портфеля, а `re=true` означает, что `re_sell` или `re_buy` включён; такой портфель считается `trading`.
+- `re=false` означает `not_trading`.
+- `portfolio.disabled` не используется для определения торговли: это другой признак.
+- Никаких отдельных `portfolio.subscribe` по каждому портфелю нет; после snapshot выполняется только штатный `robot.unsubscribe`.
+- `trading_only=true` фильтрует результат до торгующихся портфелей. Без фильтра возвращается весь массив статусов из `robot.subscribe.value.re`.
+- `p_a`, `p_d`, `p_e` и `tr` могут возвращаться как robot-wide метаданные, но `p_d` не используется для вывода «торгуется / не торгуется».
+''')
+
+          p = Path("AGENTS.md")
+          text = p.read_text()
+          marker = "## Robot portfolio trading aggregate\n"
+          start = text.index(marker)
+          p.write_text(text[:start] + '''## Robot portfolio trading aggregate
+
+- `get_robot_portfolio_trading_status` — канонический инструмент для вопросов «какие портфели торгуются / не торгуются» и подсчёта таких портфелей.
+- Единственный источник per-portfolio trading status — `robot.subscribe` -> snapshot `value.re`. Документация определяет `re[].n` как имя портфеля и `re[].re` как `Is re_sell or re_buy`.
+- Классификация: `re=true` -> `trading`, `re=false` -> `not_trading`.
+- Никогда не выводить trading status из `portfolio.disabled`, `p_d` или `p_a - p_d`: `disabled` означает другой признак и не отвечает на вопрос, работает ли `re_sell`/`re_buy`.
+- Не вызывать `available_portfolio_list.subscribe` и не делать fan-out `portfolio.subscribe` для этого агрегата. Один `robot.subscribe` уже отдаёт массив `re` целиком; документация отдельно указывает, что `re` всегда ходит целиком.
+- После snapshot обязательно выполнить `robot.unsubscribe`. Это cleanup подписки, а не дополнительное чтение портфелей.
+- `p_a`, `p_d`, `p_e` и `tr` можно сохранять как robot-wide metadata, но они не участвуют в per-portfolio классификации trading/not_trading.
+- Публичный фильтр `trading_only=true` оставляет только элементы с `re=true`; без фильтра возвращается весь список `value.re`.
+''')
+
+          Path("tests/test_robot_portfolio_trading_status.py").write_text('''from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from app.config import Settings
+from app.export_store import ExportStore
+from app.service import MarketDataService
+from app.viking_client import VikingClient, VikingProtocolError
+
+
+async def test_robot_portfolio_summary_uses_documented_re_flags():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {"robot-sub": object()}
+    client._subscribe = AsyncMock(
+        return_value={
+            "type": "robot.subscribe",
+            "eid": "robot-sub",
+            "ts": 1,
+            "r": "s",
+            "data": {
+                "r_id": "998",
+                "value": {
+                    "p_a": 3,
+                    "p_d": 1,
+                    "p_e": 0,
+                    "tr": 2,
+                    "re": [
+                        {"n": "alpha", "f": True, "re": True},
+                        {"n": "beta", "f": False, "re": False},
+                        {"n": "gamma", "f": True, "re": True},
+                    ],
+                },
+            },
+        }
+    )
+    client._unsubscribe_log_subscription = AsyncMock(return_value={"unsubscribed": True})
+    client.close = AsyncMock()
+
+    result = await client.get_robot_portfolio_summary(robot_id="998")
+
+    client._subscribe.assert_awaited_once_with("robot.subscribe", {"r_id": "998"})
+    assert result["portfolio_status_count"] == 3
+    assert result["trading_portfolios"] == 2
+    assert result["not_trading_portfolios"] == 1
+    assert result["portfolio_statuses"] == [
+        {"portfolio": "alpha", "trading": True, "status": "trading", "re": True, "f": True},
+        {"portfolio": "beta", "trading": False, "status": "not_trading", "re": False, "f": False},
+        {"portfolio": "gamma", "trading": True, "status": "trading", "re": True, "f": True},
+    ]
+    client._unsubscribe_log_subscription.assert_awaited_once_with(
+        "robot-sub",
+        expected_subscribe_type="robot.subscribe",
+        unsubscribe_type="robot.unsubscribe",
+    )
+
+
+async def test_robot_portfolio_summary_rejects_non_boolean_re_flag():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {"robot-sub": object()}
+    client._subscribe = AsyncMock(
+        return_value={
+            "type": "robot.subscribe",
+            "eid": "robot-sub",
+            "ts": 1,
+            "r": "s",
+            "data": {
+                "r_id": "998",
+                "value": {
+                    "p_a": 1,
+                    "p_d": 0,
+                    "p_e": 0,
+                    "tr": 2,
+                    "re": [{"n": "alpha", "f": True, "re": 1}],
+                },
+            },
+        }
+    )
+    client.close = AsyncMock()
+
+    with pytest.raises(VikingProtocolError, match=r"value\.re\[0\]\.re must be boolean"):
+        await client.get_robot_portfolio_summary(robot_id="998")
+
+    client.close.assert_awaited_once()
+
+
+def _service(tmp_path, client):
+    settings = Settings(
+        export_dir=tmp_path,
+        public_base_url="https://example.test",
+        export_signing_key="test-signing-key",
+    )
+    return MarketDataService(settings, client, ExportStore(settings))
+
+
+async def test_status_uses_only_single_robot_snapshot_without_portfolio_fanout(tmp_path):
+    client = SimpleNamespace(
+        get_robot_portfolio_summary=AsyncMock(
+            return_value={
+                "all_portfolios": 3,
+                "disabled_portfolios": 2,
+                "expired_portfolios": 0,
+                "robot_trading_status": 2,
+                "robot_trading": True,
+                "portfolio_status_count": 3,
+                "trading_portfolios": 2,
+                "not_trading_portfolios": 1,
+                "portfolio_statuses": [
+                    {"portfolio": "alpha", "trading": True, "status": "trading", "re": True, "f": True},
+                    {"portfolio": "beta", "trading": False, "status": "not_trading", "re": False, "f": False},
+                    {"portfolio": "gamma", "trading": True, "status": "trading", "re": True, "f": True},
+                ],
+            }
+        )
+    )
+
+    result = await _service(tmp_path, client).get_robot_portfolio_trading_status(
+        robot_id="998"
+    )
+
+    client.get_robot_portfolio_summary.assert_awaited_once_with(robot_id="998")
+    assert result["trading_count"] == 2
+    assert result["not_trading_count"] == 1
+    assert result["detail_source"] == "robot.subscribe.value.re"
+    assert result["portfolio_trading_rule"] == "re == true (re_sell or re_buy)"
+    assert result["per_portfolio_reads"] == 0
+    assert [item["status"] for item in result["items"]] == [
+        "trading",
+        "not_trading",
+        "trading",
+    ]
+    assert "disabled" not in result["portfolio_trading_rule"]
+
+
+async def test_status_trading_only_filters_re_true(tmp_path):
+    client = SimpleNamespace(
+        get_robot_portfolio_summary=AsyncMock(
+            return_value={
+                "all_portfolios": 2,
+                "disabled_portfolios": 2,
+                "expired_portfolios": 0,
+                "robot_trading_status": 2,
+                "robot_trading": True,
+                "portfolio_status_count": 2,
+                "trading_portfolios": 1,
+                "not_trading_portfolios": 1,
+                "portfolio_statuses": [
+                    {"portfolio": "alpha", "trading": True, "status": "trading", "re": True, "f": True},
+                    {"portfolio": "beta", "trading": False, "status": "not_trading", "re": False, "f": True},
+                ],
+            }
+        )
+    )
+
+    result = await _service(tmp_path, client).get_robot_portfolio_trading_status(
+        robot_id="998",
+        trading_only=True,
+    )
+
+    assert [item["portfolio"] for item in result["items"]] == ["alpha"]
+    assert result["trading_count"] == 1
+    assert result["not_trading_count"] == 1
+    assert result["trading_only"] is True
+''')
+
+          p = Path("tests/test_mcp.py")
+          text = p.read_text()
+          anchor = '    assert tools["get_robot_portfolio_trading_status"].annotations.readOnlyHint is True\n'
+          addition = (
+              anchor
+              + '    trading_schema = tools["get_robot_portfolio_trading_status"].inputSchema["properties"]\n'
+              + '    assert "trading_only" in trading_schema\n'
+              + '    assert "enabled_only" not in trading_schema\n'
+              + '    assert "include_items" not in trading_schema\n'
+              + '    trading_description = tools["get_robot_portfolio_trading_status"].description or ""\n'
+              + '    assert "value.re[].re" in trading_description\n'
+              + '    assert "re_sell" in trading_description\n'
+              + '    assert "portfolio.disabled" in trading_description\n'
+          )
+          if anchor not in text:
+              raise SystemExit("test_mcp anchor not found")
+          p.write_text(text.replace(anchor, addition, 1))
+          PY
+
+      - name: Run focused tests
+        run: uv run pytest tests/test_robot_portfolio_trading_status.py tests/test_mcp.py
+
+      - name: Run lint
+        run: uv run ruff check app/viking_client.py app/service.py app/main.py tests/test_robot_portfolio_trading_status.py tests/test_mcp.py
+
+      - name: Commit fix and remove one-shot workflow
+        shell: bash
+        run: |
+          rm .github/workflows/fix-robot-trading-re.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add AGENTS.md README.md app/main.py app/service.py app/viking_client.py tests/test_mcp.py tests/test_robot_portfolio_trading_status.py .github/workflows/fix-robot-trading-re.yml
+          git commit -m "fix: derive portfolio trading from robot re flags"
+          git push
