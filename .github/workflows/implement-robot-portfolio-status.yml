@@ -1,4 +1,4 @@
-name: Materialize robot portfolio aggregate patch
+name: Implement robot portfolio trading aggregate
 
 on:
   push:
@@ -11,18 +11,19 @@ permissions:
   contents: write
 
 jobs:
-  materialize:
+  implement:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: agent/robot-portfolio-trading-status
-          fetch-depth: 3
+          fetch-depth: 0
           persist-credentials: true
-      - name: Recover patch script from first workflow revision
+      - uses: astral-sh/setup-uv@v5
+      - name: Recover and apply patch
         shell: bash
         run: |
-          git show HEAD^^:.github/workflows/implement-robot-portfolio-status.yml > /tmp/original-workflow.yml
+          git show d783cc36549d14534c5e21a195d049025a27dab3:.github/workflows/implement-robot-portfolio-status.yml > /tmp/original-workflow.yml
           python - <<'PY'
           from pathlib import Path
 
@@ -31,12 +32,36 @@ jobs:
           end_marker = "\n          PY\n      - name: Verify"
           start = text.index(start_marker) + len(start_marker)
           end = text.index(end_marker, start)
-          lines = text[start:end].splitlines()
-          normalized = [line[10:] if line.startswith('          ') else line for line in lines]
+          source_lines = text[start:end].splitlines()
+          normalized = []
+          in_triple = False
+          for line in source_lines:
+              has_triple = "'''" in line
+              if in_triple:
+                  if has_triple:
+                      normalized.append(line[10:] if line.startswith('          ') else line)
+                      in_triple = False
+                  else:
+                      normalized.append(line)
+              else:
+                  normalized.append(line[10:] if line.startswith('          ') else line)
+                  if has_triple and line.count("'''") % 2 == 1:
+                      in_triple = True
           Path('.tmp_implement_robot_status.py').write_text('\n'.join(normalized) + '\n', encoding='utf-8')
           PY
+          python .tmp_implement_robot_status.py
+      - name: Verify
+        shell: bash
+        run: |
+          uv sync --dev
+          uv run ruff check .
+          uv run pytest -q
+      - name: Commit implementation and remove temporary files
+        shell: bash
+        run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .tmp_implement_robot_status.py
-          git commit -m "chore: materialize robot status patch script"
+          git rm .github/workflows/implement-robot-portfolio-status.yml .tmp_implement_robot_status.py
+          git add app/viking_client.py app/service.py app/main.py tests/test_robot_portfolio_trading_status.py README.md AGENTS.md
+          git commit -m "feat: add robot portfolio trading status aggregate"
           git push origin HEAD:agent/robot-portfolio-trading-status
