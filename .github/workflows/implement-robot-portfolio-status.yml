@@ -50,6 +50,26 @@ jobs:
           Path('.tmp_implement_robot_status.py').write_text('\n'.join(normalized) + '\n', encoding='utf-8')
           PY
           python .tmp_implement_robot_status.py
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('tests/test_mcp.py')
+          text = path.read_text(encoding='utf-8')
+          anchor = '        "get_current_portfolio_data",\n'
+          replacement = anchor + '        "get_robot_portfolio_trading_status",\n'
+          if text.count(anchor) != 1:
+              raise SystemExit('tests/test_mcp.py: expected tool-list anchor exactly once')
+          text = text.replace(anchor, replacement, 1)
+          anchor = '    assert tools["get_current_portfolio_data"].annotations.idempotentHint is True\n'
+          replacement = (
+              anchor
+              + '    assert tools["get_robot_portfolio_trading_status"].annotations.idempotentHint is True\n'
+              + '    assert tools["get_robot_portfolio_trading_status"].annotations.readOnlyHint is True\n'
+          )
+          if text.count(anchor) != 1:
+              raise SystemExit('tests/test_mcp.py: expected annotation anchor exactly once')
+          path.write_text(text.replace(anchor, replacement, 1), encoding='utf-8')
+          PY
           rm .tmp_implement_robot_status.py
       - name: Verify
         shell: bash
@@ -64,6 +84,6 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git rm .github/workflows/implement-robot-portfolio-status.yml
           git add -u .tmp_implement_robot_status.py
-          git add app/viking_client.py app/service.py app/main.py tests/test_robot_portfolio_trading_status.py README.md AGENTS.md
+          git add app/viking_client.py app/service.py app/main.py tests/test_robot_portfolio_trading_status.py tests/test_mcp.py README.md AGENTS.md
           git commit -m "feat: add robot portfolio trading status aggregate"
           git push origin HEAD:agent/robot-portfolio-trading-status
