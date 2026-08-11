@@ -42,9 +42,9 @@ mcp = FastMCP(
         "Пользователь уже прошёл безопасную браузерную OAuth-авторизацию. Никогда не проси "
         "email или API key в чате. Сначала вызывай list_available_portfolios. "
         "Текущее полное состояние портфеля получай через get_current_portfolio_data. "
-        "Для вопросов о количестве включённых/выключенных портфелей робота или о том, "
-        "какие именно портфели включены, всегда используй get_robot_portfolio_trading_status; "
-        "не делай fan-out из get_current_portfolio_data по каждому портфелю. "
+        "Для вопросов о том, какие портфели робота торгуются или не торгуются, используй "
+        "get_robot_portfolio_trading_status: статус берётся только из robot.subscribe value.re[].re, "
+        "где true означает re_sell или re_buy. Не используй portfolio.disabled. "
         "Схему и назначение динамических полей получай через get_portfolio_template. "
         "Для исторической выгрузки выбирай портфель с history_available=true; "
         "в get_portfolio_data даты всегда передавай с часовым поясом. "
@@ -198,26 +198,21 @@ async def search_portfolios(
 @mcp.tool(
     title="Статус торговли портфелей робота",
     description=(
-        "Одним read-only MCP-вызовом возвращает robot-wide счётчики p_a/p_d/p_e и точные "
-        "счётчики по портфелям, доступным текущей роли. trading_enabled означает строго "
-        "disabled=false. Для быстрого ответа только по количествам оставь include_items=false. "
-        "Чтобы получить конкретные портфели, установи include_items=true; enabled_only=true "
-        "вернёт только явно включённые. Массовые portfolio.subscribe выполняются внутри сервера "
-        "группами до 50 сообщений, поэтому агент не должен вызывать get_current_portfolio_data "
-        "по каждому портфелю отдельно."
+        "Одним robot.subscribe получает весь массив value.re и определяет статус каждого "
+        "портфеля только по re: re=true означает re_sell или re_buy и статус trading; "
+        "re=false означает not_trading. portfolio.disabled для этого не используется. "
+        "trading_only=true возвращает только торгующиеся портфели. Отдельных "
+        "portfolio.subscribe по каждому портфелю нет."
     ),
     annotations=READ_ONLY,
 )
 async def get_robot_portfolio_trading_status(
     robot_id: Annotated[str, Field(min_length=1, description="Идентификатор робота")],
-    include_items: bool = False,
-    enabled_only: bool = False,
+    trading_only: bool = False,
 ) -> CallToolResult:
     try:
         result = await _service_for_request().get_robot_portfolio_trading_status(
-            robot_id=robot_id,
-            include_items=include_items,
-            enabled_only=enabled_only,
+            robot_id=robot_id, trading_only=trading_only
         )
     except SUBSCRIPTION_ERRORS as exc:
         logger.warning("Robot portfolio trading status request failed: %s", exc)
@@ -227,11 +222,8 @@ async def get_robot_portfolio_trading_status(
             TextContent(
                 type="text",
                 text=(
-                    f"Робот {robot_id}: доступно текущей роли "
-                    f"{result['accessible_total_count']} портфелей; "
-                    f"явно включено {result['accessible_enabled_count']}, "
-                    f"выключено {result['accessible_disabled_count']}, "
-                    f"неизвестно {result['accessible_unknown_count']}."
+                    f"Робот {robot_id}: торгуется {result['trading_count']} портфелей, "
+                    f"не торгуется {result['not_trading_count']}."
                 ),
             )
         ],
@@ -258,10 +250,7 @@ async def subscribe_available_portfolios() -> CallToolResult:
         content=[
             TextContent(
                 type="text",
-                text=(
-                    f"Подписка создана. Получено портфелей: "
-                    f"{len(result['portfolios_add'])}."
-                ),
+                text=(f"Подписка создана. Получено портфелей: {len(result['portfolios_add'])}."),
             )
         ],
         structuredContent=result,
@@ -292,11 +281,7 @@ async def get_available_portfolio_updates(
         logger.warning("Reading available portfolios updates failed: %s", exc)
         return _error_result(exc)
     return CallToolResult(
-        content=[
-            TextContent(
-                type="text", text=f"Получено событий подписки: {result['event_count']}."
-            )
-        ],
+        content=[TextContent(type="text", text=f"Получено событий подписки: {result['event_count']}.")],
         structuredContent=result,
     )
 
@@ -347,17 +332,14 @@ async def get_portfolio_template(
         logger.warning("Portfolio template request failed: %s", exc)
         return _error_result(exc)
     field_count = sum(
-        len(fields)
-        for fields in result["template_fields"].values()
-        if isinstance(fields, list)
+        len(fields) for fields in result["template_fields"].values() if isinstance(fields, list)
     )
     return CallToolResult(
         content=[
             TextContent(
                 type="text",
                 text=(
-                    f"Получен шаблон {result['template_id']} для "
-                    f"{robot_id}/{portfolio}: {field_count} полей."
+                    f"Получен шаблон {result['template_id']} для {robot_id}/{portfolio}: {field_count} полей."
                 ),
             )
         ],
@@ -413,6 +395,7 @@ async def get_current_portfolio_data(
         ],
         structuredContent=result,
     )
+
 
 @mcp.tool(
     title="Подписаться на портфель",
@@ -491,8 +474,7 @@ async def get_portfolio_updates(
 @mcp.tool(
     title="Отписаться от портфеля",
     description=(
-        "Вызывает Viking portfolio.unsubscribe для указанного subscription_id и возвращает "
-        "полный ответ API."
+        "Вызывает Viking portfolio.unsubscribe для указанного subscription_id и возвращает полный ответ API."
     ),
     annotations=SUBSCRIPTION_TOOL,
 )
@@ -500,9 +482,7 @@ async def unsubscribe_portfolio(
     subscription_id: Annotated[str, Field(min_length=1)],
 ) -> CallToolResult:
     try:
-        result = await _service_for_request().unsubscribe_portfolio(
-            subscription_id=subscription_id
-        )
+        result = await _service_for_request().unsubscribe_portfolio(subscription_id=subscription_id)
     except SUBSCRIPTION_ERRORS as exc:
         logger.warning("Portfolio unsubscribe failed: %s", exc)
         return _error_result(exc)
@@ -596,9 +576,7 @@ async def unsubscribe_portfolio_logs(
     subscription_id: Annotated[str, Field(min_length=1)],
 ) -> CallToolResult:
     try:
-        result = await _service_for_request().unsubscribe_portfolio_logs(
-            subscription_id=subscription_id
-        )
+        result = await _service_for_request().unsubscribe_portfolio_logs(subscription_id=subscription_id)
     except SUBSCRIPTION_ERRORS as exc:
         logger.warning("Portfolio logs unsubscribe failed: %s", exc)
         return _error_result(exc)
@@ -630,8 +608,7 @@ async def subscribe_robot_logs(
             TextContent(
                 type="text",
                 text=(
-                    f"Подписка на логи робота {robot_id} создана. "
-                    f"Получено записей: {result['log_count']}."
+                    f"Подписка на логи робота {robot_id} создана. Получено записей: {result['log_count']}."
                 ),
             )
         ],
@@ -679,8 +656,7 @@ async def get_robot_log_updates(
 @mcp.tool(
     title="Отписаться от логов робота",
     description=(
-        "Вызывает Viking robot_logs.unsubscribe с sub_eid активной подписки "
-        "и возвращает полный ответ API."
+        "Вызывает Viking robot_logs.unsubscribe с sub_eid активной подписки и возвращает полный ответ API."
     ),
     annotations=SUBSCRIPTION_TOOL,
 )
@@ -688,9 +664,7 @@ async def unsubscribe_robot_logs(
     subscription_id: Annotated[str, Field(min_length=1)],
 ) -> CallToolResult:
     try:
-        result = await _service_for_request().unsubscribe_robot_logs(
-            subscription_id=subscription_id
-        )
+        result = await _service_for_request().unsubscribe_robot_logs(subscription_id=subscription_id)
     except SUBSCRIPTION_ERRORS as exc:
         logger.warning("Robot logs unsubscribe failed: %s", exc)
         return _error_result(exc)
@@ -744,14 +718,12 @@ async def get_robot_log_history(
         content=[
             TextContent(
                 type="text",
-                text=(
-                    "Получено записей истории логов робота: "
-                    f"{result['row_count']}."
-                ),
+                text=(f"Получено записей истории логов робота: {result['row_count']}."),
             )
         ],
         structuredContent=result,
     )
+
 
 @mcp.tool(
     title="Подписаться на сделки портфеля",
@@ -777,10 +749,12 @@ async def subscribe_portfolio_deals(
         logger.warning("Portfolio deals subscription failed: %s", exc)
         return _error_result(exc)
     return CallToolResult(
-        content=[TextContent(
-            type="text",
-            text=f"Подписка на сделки создана. Получено сделок: {result['deal_count']}.",
-        )],
+        content=[
+            TextContent(
+                type="text",
+                text=f"Подписка на сделки создана. Получено сделок: {result['deal_count']}.",
+            )
+        ],
         structuredContent=result,
     )
 
@@ -812,9 +786,7 @@ async def get_portfolio_deal_updates(
         logger.warning("Reading portfolio deal updates failed: %s", exc)
         return _error_result(exc)
     return CallToolResult(
-        content=[TextContent(
-            type="text", text=f"Получено событий сделок: {result['event_count']}."
-        )],
+        content=[TextContent(type="text", text=f"Получено событий сделок: {result['event_count']}.")],
         structuredContent=result,
     )
 
@@ -828,9 +800,7 @@ async def unsubscribe_portfolio_deals(
     subscription_id: Annotated[str, Field(min_length=1)],
 ) -> CallToolResult:
     try:
-        result = await _service_for_request().unsubscribe_portfolio_deals(
-            subscription_id=subscription_id
-        )
+        result = await _service_for_request().unsubscribe_portfolio_deals(subscription_id=subscription_id)
     except SUBSCRIPTION_ERRORS as exc:
         logger.warning("Portfolio deals unsubscribe failed: %s", exc)
         return _error_result(exc)
@@ -884,6 +854,7 @@ async def get_previous_portfolio_deals(
         structuredContent=result,
     )
 
+
 @mcp.tool(
     title="Инструменты из истории сделок",
     description=(
@@ -904,9 +875,7 @@ async def get_portfolio_deal_sec_keys(
         logger.warning("Portfolio deal sec keys request failed: %s", exc)
         return _error_result(exc)
     return CallToolResult(
-        content=[TextContent(
-            type="text", text=f"Найдено инструментов: {result['security_count']}."
-        )],
+        content=[TextContent(type="text", text=f"Найдено инструментов: {result['security_count']}.")],
         structuredContent=result,
     )
 
@@ -958,24 +927,31 @@ async def get_portfolio_deal_history(
         structuredContent=result,
     )
 
-@mcp.tool(title="Подписаться на маркет-дата подключения", description=(
-    "Подписывается на статусы всех существующих market-data подключений робота. Набор "
-    "подключений определяется сервером/колокацией; клиент их не создаёт. Сохрани "
-    "subscription_id и читай обновления отдельным инструментом."
-), annotations=SUBSCRIPTION_TOOL)
-async def subscribe_data_connections(
-    robot_id: Annotated[str, Field(min_length=1)]
-) -> CallToolResult:
+
+@mcp.tool(
+    title="Подписаться на маркет-дата подключения",
+    description=(
+        "Подписывается на статусы всех существующих market-data подключений робота. Набор "
+        "подключений определяется сервером/колокацией; клиент их не создаёт. Сохрани "
+        "subscription_id и читай обновления отдельным инструментом."
+    ),
+    annotations=SUBSCRIPTION_TOOL,
+)
+async def subscribe_data_connections(robot_id: Annotated[str, Field(min_length=1)]) -> CallToolResult:
     return _connection_result(
         await _service_for_request().subscribe_data_connections(robot_id=robot_id),
         "Подписка на market-data подключения создана.",
     )
 
 
-@mcp.tool(title="Обновления маркет-дата подключений", description=(
-    "Читает накопленные r='u' и повторные r='s' события data_conn.subscribe. "
-    "wait_seconds до 30 секунд. После наблюдения обязательно отпишись."
-), annotations=READ_ONLY)
+@mcp.tool(
+    title="Обновления маркет-дата подключений",
+    description=(
+        "Читает накопленные r='u' и повторные r='s' события data_conn.subscribe. "
+        "wait_seconds до 30 секунд. После наблюдения обязательно отпишись."
+    ),
+    annotations=READ_ONLY,
+)
 async def get_data_connection_updates(
     subscription_id: Annotated[str, Field(min_length=1)],
     wait_seconds: Annotated[float, Field(ge=0, le=30)] = 0,
@@ -987,37 +963,45 @@ async def get_data_connection_updates(
     return _connection_result(result, f"Получено событий: {result['event_count']}.")
 
 
-@mcp.tool(title="Список маркет-дата подключений", description=(
-    "Возвращает все market-data подключения робота как они предоставлены его сервером. "
-    "disabled=true означает неактивное подключение. Некоторые источники нужно включать парами, "
-    "например Definitions вместе с OrderBook или BestPrices."
-), annotations=READ_ONLY)
-async def get_all_data_connections(
-    robot_id: Annotated[str, Field(min_length=1)]
-) -> CallToolResult:
+@mcp.tool(
+    title="Список маркет-дата подключений",
+    description=(
+        "Возвращает все market-data подключения робота как они предоставлены его сервером. "
+        "disabled=true означает неактивное подключение. Некоторые источники нужно включать парами, "
+        "например Definitions вместе с OrderBook или BestPrices."
+    ),
+    annotations=READ_ONLY,
+)
+async def get_all_data_connections(robot_id: Annotated[str, Field(min_length=1)]) -> CallToolResult:
     result = await _service_for_request().get_all_data_connections(robot_id=robot_id)
     return _connection_result(result, f"Маркет-дата подключений: {result['connection_count']}.")
 
 
-@mcp.tool(title="Отписаться от маркет-дата подключений", description=(
-    "Завершает data_conn.subscribe. Передай subscription_id, полученный при подписке; "
-    "на Viking он отправляется как sub_eid."
-), annotations=READ_ONLY)
+@mcp.tool(
+    title="Отписаться от маркет-дата подключений",
+    description=(
+        "Завершает data_conn.subscribe. Передай subscription_id, полученный при подписке; "
+        "на Viking он отправляется как sub_eid."
+    ),
+    annotations=READ_ONLY,
+)
 async def unsubscribe_data_connections(
-    subscription_id: Annotated[str, Field(min_length=1)]
+    subscription_id: Annotated[str, Field(min_length=1)],
 ) -> CallToolResult:
     return _connection_result(
-        await _service_for_request().unsubscribe_data_connections(
-            subscription_id=subscription_id
-        ),
+        await _service_for_request().unsubscribe_data_connections(subscription_id=subscription_id),
         "Подписка на market-data подключения завершена.",
     )
 
 
-@mcp.tool(title="Параметры транзакционного подключения", description=(
-    "Возвращает все параметры выбранного transactional connection. Подключение задаётся парой "
-    "sec_type + name; неизвестные специфичные для биржи поля сохраняются."
-), annotations=READ_ONLY)
+@mcp.tool(
+    title="Параметры транзакционного подключения",
+    description=(
+        "Возвращает все параметры выбранного transactional connection. Подключение задаётся парой "
+        "sec_type + name; неизвестные специфичные для биржи поля сохраняются."
+    ),
+    annotations=READ_ONLY,
+)
 async def get_transaction_connection(
     robot_id: Annotated[str, Field(min_length=1)],
     sec_type: Annotated[int, Field(ge=0)],
@@ -1031,11 +1015,15 @@ async def get_transaction_connection(
     )
 
 
-@mcp.tool(title="Инструменты транзакционного подключения", description=(
-    "Возвращает инструменты из портфелей робота, client code которых относится к выбранному "
-    "подключению. Использует фактический метод trans_conn.get_used_secs: в таблице запроса "
-    "официального api.md ошибочно написано trans_conn.get."
-), annotations=READ_ONLY)
+@mcp.tool(
+    title="Инструменты транзакционного подключения",
+    description=(
+        "Возвращает инструменты из портфелей робота, client code которых относится к выбранному "
+        "подключению. Использует фактический метод trans_conn.get_used_secs: в таблице запроса "
+        "официального api.md ошибочно написано trans_conn.get."
+    ),
+    annotations=READ_ONLY,
+)
 async def get_transaction_connection_used_securities(
     robot_id: Annotated[str, Field(min_length=1)],
     sec_type: Annotated[int, Field(ge=0)],
@@ -1047,23 +1035,29 @@ async def get_transaction_connection_used_securities(
     return _connection_result(result, f"Финансовых инструментов: {result['security_count']}.")
 
 
-@mcp.tool(title="Подписаться на транзакционные подключения", description=(
-    "Подписывается на статусы transactional connections робота. Обычно существует как минимум "
-    "0_virtual. Поля can_check_pos и has_pos показывают, доступны ли заявки и позиции."
-), annotations=SUBSCRIPTION_TOOL)
-async def subscribe_transaction_connections(
-    robot_id: Annotated[str, Field(min_length=1)]
-) -> CallToolResult:
+@mcp.tool(
+    title="Подписаться на транзакционные подключения",
+    description=(
+        "Подписывается на статусы transactional connections робота. Обычно существует как минимум "
+        "0_virtual. Поля can_check_pos и has_pos показывают, доступны ли заявки и позиции."
+    ),
+    annotations=SUBSCRIPTION_TOOL,
+)
+async def subscribe_transaction_connections(robot_id: Annotated[str, Field(min_length=1)]) -> CallToolResult:
     return _connection_result(
         await _service_for_request().subscribe_transaction_connections(robot_id=robot_id),
         "Подписка на транзакционные подключения создана.",
     )
 
 
-@mcp.tool(title="Обновления транзакционных подключений", description=(
-    "Читает накопленные статусы trans_conn.subscribe. Возможны r='u' и повторный полный "
-    "r='s'. Удаление обозначается __action='del'."
-), annotations=READ_ONLY)
+@mcp.tool(
+    title="Обновления транзакционных подключений",
+    description=(
+        "Читает накопленные статусы trans_conn.subscribe. Возможны r='u' и повторный полный "
+        "r='s'. Удаление обозначается __action='del'."
+    ),
+    annotations=READ_ONLY,
+)
 async def get_transaction_connection_updates(
     subscription_id: Annotated[str, Field(min_length=1)],
     wait_seconds: Annotated[float, Field(ge=0, le=30)] = 0,
@@ -1075,35 +1069,41 @@ async def get_transaction_connection_updates(
     return _connection_result(result, f"Получено событий: {result['event_count']}.")
 
 
-@mcp.tool(title="Список транзакционных подключений", description=(
-    "Возвращает все transactional connections робота. can_check_pos означает возможность "
-    "показывать активные заявки, has_pos — получать позиции; эти возможности есть не у всех."
-), annotations=READ_ONLY)
-async def get_all_transaction_connections(
-    robot_id: Annotated[str, Field(min_length=1)]
-) -> CallToolResult:
+@mcp.tool(
+    title="Список транзакционных подключений",
+    description=(
+        "Возвращает все transactional connections робота. can_check_pos означает возможность "
+        "показывать активные заявки, has_pos — получать позиции; эти возможности есть не у всех."
+    ),
+    annotations=READ_ONLY,
+)
+async def get_all_transaction_connections(robot_id: Annotated[str, Field(min_length=1)]) -> CallToolResult:
     result = await _service_for_request().get_all_transaction_connections(robot_id=robot_id)
     return _connection_result(result, f"Транзакционных подключений: {result['connection_count']}.")
 
 
-@mcp.tool(title="Отписаться от транзакционных подключений", description=(
-    "Завершает trans_conn.subscribe по subscription_id/sub_eid."
-), annotations=READ_ONLY)
+@mcp.tool(
+    title="Отписаться от транзакционных подключений",
+    description=("Завершает trans_conn.subscribe по subscription_id/sub_eid."),
+    annotations=READ_ONLY,
+)
 async def unsubscribe_transaction_connections(
-    subscription_id: Annotated[str, Field(min_length=1)]
+    subscription_id: Annotated[str, Field(min_length=1)],
 ) -> CallToolResult:
     return _connection_result(
-        await _service_for_request().unsubscribe_transaction_connections(
-            subscription_id=subscription_id
-        ),
+        await _service_for_request().unsubscribe_transaction_connections(subscription_id=subscription_id),
         "Подписка на транзакционные подключения завершена.",
     )
 
 
-@mcp.tool(title="Подписаться на активные заявки", description=(
-    "Подписывается на активные заявки конкретного transactional connection. Вызывай только "
-    "для подключения с can_check_pos=true. Возвращает snapshot active_orders и обновления."
-), annotations=SUBSCRIPTION_TOOL)
+@mcp.tool(
+    title="Подписаться на активные заявки",
+    description=(
+        "Подписывается на активные заявки конкретного transactional connection. Вызывай только "
+        "для подключения с can_check_pos=true. Возвращает snapshot active_orders и обновления."
+    ),
+    annotations=SUBSCRIPTION_TOOL,
+)
 async def subscribe_transaction_orders(
     robot_id: Annotated[str, Field(min_length=1)],
     sec_type: Annotated[int, Field(ge=0)],
@@ -1117,10 +1117,14 @@ async def subscribe_transaction_orders(
     )
 
 
-@mcp.tool(title="Обновления активных заявок", description=(
-    "Читает накопленные события trans_conn_orders.subscribe. Удалённая/исполненная заявка "
-    "передаётся как запись active_orders с __action='del'."
-), annotations=READ_ONLY)
+@mcp.tool(
+    title="Обновления активных заявок",
+    description=(
+        "Читает накопленные события trans_conn_orders.subscribe. Удалённая/исполненная заявка "
+        "передаётся как запись active_orders с __action='del'."
+    ),
+    annotations=READ_ONLY,
+)
 async def get_transaction_order_updates(
     subscription_id: Annotated[str, Field(min_length=1)],
     wait_seconds: Annotated[float, Field(ge=0, le=30)] = 0,
@@ -1132,24 +1136,28 @@ async def get_transaction_order_updates(
     return _connection_result(result, f"Получено событий заявок: {result['event_count']}.")
 
 
-@mcp.tool(title="Отписаться от активных заявок", description=(
-    "Завершает trans_conn_orders.subscribe по subscription_id/sub_eid."
-), annotations=READ_ONLY)
+@mcp.tool(
+    title="Отписаться от активных заявок",
+    description=("Завершает trans_conn_orders.subscribe по subscription_id/sub_eid."),
+    annotations=READ_ONLY,
+)
 async def unsubscribe_transaction_orders(
-    subscription_id: Annotated[str, Field(min_length=1)]
+    subscription_id: Annotated[str, Field(min_length=1)],
 ) -> CallToolResult:
     return _connection_result(
-        await _service_for_request().unsubscribe_transaction_orders(
-            subscription_id=subscription_id
-        ),
+        await _service_for_request().unsubscribe_transaction_orders(subscription_id=subscription_id),
         "Подписка на активные заявки завершена.",
     )
 
 
-@mcp.tool(title="Подписаться на позиции подключения", description=(
-    "Подписывается на sec_pos и coin_pos конкретного transactional connection. Вызывай только "
-    "для подключения с has_pos=true; не все подключения передают позиции."
-), annotations=SUBSCRIPTION_TOOL)
+@mcp.tool(
+    title="Подписаться на позиции подключения",
+    description=(
+        "Подписывается на sec_pos и coin_pos конкретного transactional connection. Вызывай только "
+        "для подключения с has_pos=true; не все подключения передают позиции."
+    ),
+    annotations=SUBSCRIPTION_TOOL,
+)
 async def subscribe_transaction_positions(
     robot_id: Annotated[str, Field(min_length=1)],
     sec_type: Annotated[int, Field(ge=0)],
@@ -1163,10 +1171,14 @@ async def subscribe_transaction_positions(
     )
 
 
-@mcp.tool(title="Обновления позиций подключения", description=(
-    "Читает накопленные события trans_conn_poses.subscribe: sec_pos, coin_pos и их изменения. "
-    "Удаление элемента обозначается __action='del'."
-), annotations=READ_ONLY)
+@mcp.tool(
+    title="Обновления позиций подключения",
+    description=(
+        "Читает накопленные события trans_conn_poses.subscribe: sec_pos, coin_pos и их изменения. "
+        "Удаление элемента обозначается __action='del'."
+    ),
+    annotations=READ_ONLY,
+)
 async def get_transaction_position_updates(
     subscription_id: Annotated[str, Field(min_length=1)],
     wait_seconds: Annotated[float, Field(ge=0, le=30)] = 0,
@@ -1178,18 +1190,19 @@ async def get_transaction_position_updates(
     return _connection_result(result, f"Получено событий позиций: {result['event_count']}.")
 
 
-@mcp.tool(title="Отписаться от позиций подключения", description=(
-    "Завершает trans_conn_poses.subscribe по subscription_id/sub_eid."
-), annotations=READ_ONLY)
+@mcp.tool(
+    title="Отписаться от позиций подключения",
+    description=("Завершает trans_conn_poses.subscribe по subscription_id/sub_eid."),
+    annotations=READ_ONLY,
+)
 async def unsubscribe_transaction_positions(
-    subscription_id: Annotated[str, Field(min_length=1)]
+    subscription_id: Annotated[str, Field(min_length=1)],
 ) -> CallToolResult:
     return _connection_result(
-        await _service_for_request().unsubscribe_transaction_positions(
-            subscription_id=subscription_id
-        ),
+        await _service_for_request().unsubscribe_transaction_positions(subscription_id=subscription_id),
         "Подписка на позиции завершена.",
     )
+
 
 @mcp.tool(
     title="Инструменты робота",
