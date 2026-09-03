@@ -70,6 +70,11 @@ mcp = FastMCP(
         "получай через get_robot_log_history. Логи робота не содержат уведомлений платформы "
         "(плановые перезапуски, объявления) — их отдаёт get_messages_history; для вопросов "
         "«что будет с роботом», «есть ли уведомления» используй его, а не логи. "
+        "Текущее состояние самого робота — жив ли процесс, какая на нём версия, какая "
+        "сборка на сервере, сколько сейчас намотал главный цикл — получай через "
+        "get_robot_status. Он отвечает только про «сейчас»: факт и время перезапуска "
+        "по одному снапшоту не определяются, для них остаются robot_logs (строка «Robot "
+        "was started with version») и get_messages_history. "
         "Для сделок отдельных инструментов портфеля используй subscribe_portfolio_deals, "
         "get_portfolio_deal_updates и unsubscribe_portfolio_deals; доступные инструменты "
         "получай через get_portfolio_deal_sec_keys, историю — через "
@@ -243,6 +248,55 @@ async def get_robot_portfolio_trading_status(
         ],
         structuredContent=result,
     )
+
+@mcp.tool(
+    title="Состояние самого робота",
+    description=(
+        "Возвращает состояние робота как процесса, а не его портфелей: подключён ли он "
+        "к бэкенду (rc), статус процесса (ps), версия робота и версия сборки на сервере "
+        "(rv и sv), текущий счётчик главного цикла (mc), "
+        "время робота (dt) и его часовой пояс, статусы market-data и транзакционного "
+        "подключений. Отвечает на вопросы «жив ли робот», «какая на нём версия», "
+        "«отличается ли сборка на сервере». Факт и время перезапуска по одному "
+        "снапшоту не устанавливаются — для них robot_logs и get_messages_history. "
+        "Статус торговли отдельных "
+        "портфелей сюда не входит — для него get_robot_portfolio_trading_status. "
+        "same_build сравнивает rv и sv по общему префиксу, потому что Viking обрезает "
+        "их до разной длины для одной и той же сборки."
+    ),
+    annotations=READ_ONLY,
+)
+async def get_robot_status(
+    robot_id: Annotated[str, Field(min_length=1, description="Идентификатор робота")],
+    timezone: str = "Europe/Moscow",
+    raw: bool = False,
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().get_robot_status(
+            robot_id=robot_id, timezone=timezone, raw=raw
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Robot status request failed: %s", exc)
+        return _error_result(exc)
+    state = result["items"][0]
+    connected = state.get("rc")
+    if connected is True:
+        summary = "подключён"
+    elif connected is False:
+        summary = "не подключён"
+    else:
+        summary = "состояние подключения неизвестно"
+    version = state.get("rv") or "версия неизвестна"
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=f"Робот {robot_id}: {summary}, версия {version}.",
+            )
+        ],
+        structuredContent=result,
+    )
+
 
 @mcp.tool(
     title="Подписаться на доступные портфели",

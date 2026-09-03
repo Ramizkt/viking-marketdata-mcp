@@ -64,6 +64,84 @@ def epoch_ms_to_iso(value: Any, timezone: str) -> str | None:
     return dt.isoformat(timespec="milliseconds")
 
 
+def epoch_sec_to_iso(value: Any, timezone: str) -> str | None:
+    """Format an ``epoch_sec`` value (robot.subscribe ``rvd``/``svd``); -1 means unknown."""
+    if value is None:
+        return None
+    try:
+        seconds = int(value)
+        tz = ZoneInfo(timezone)
+    except (TypeError, ValueError, OverflowError, KeyError) as exc:
+        raise ValueError(
+            f"Invalid epoch seconds or timezone: {value!r}, {timezone!r}"
+        ) from exc
+    if seconds < 0:
+        return None
+    return datetime.fromtimestamp(seconds, tz=tz).isoformat(timespec="seconds")
+
+
+STREAM_STATUS_LABELS = {
+    0: "disconnected",
+    1: "connecting",
+    2: "connected",
+    3: "unknown",
+    4: "closed_by_time",
+}
+TRADING_STATUS_LABELS = {0: "not_trading", 2: "trading", 3: "unknown"}
+PROCESS_STATUS_LABELS = {0: "not_running", 2: "running", 3: "unknown"}
+
+
+def same_build(robot_version: Any, server_version: Any) -> bool | None:
+    """Compare ``rv`` with ``sv`` by common prefix, not by equality.
+
+    Viking truncates the two strings to different lengths for the same build: the
+    official api.md example pairs ``rv`` ``"ec1d046c"`` with ``sv`` ``"ec1d046"``.
+    Plain equality would report such a robot as out of date. Returns None when either
+    value is missing or empty.
+    """
+    if not isinstance(robot_version, str) or not isinstance(server_version, str):
+        return None
+    if not robot_version or not server_version:
+        return None
+    return robot_version.startswith(server_version) or server_version.startswith(
+        robot_version
+    )
+
+
+def _status_label(value: Any, labels: dict[int, str]) -> str | None:
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    return labels.get(value, "unknown")
+
+
+def compact_robot_state(state: dict[str, Any], timezone: str) -> dict[str, Any]:
+    """Present robot-level ``robot.subscribe`` fields readably; keeps every original key."""
+    result = dict(sanitize_value(state))
+    result["connected"] = result.get("rc")
+    for key, name, labels in (
+        ("ps", "process", PROCESS_STATUS_LABELS),
+        ("tr", "trading", TRADING_STATUS_LABELS),
+        ("mdc", "market_data_status", STREAM_STATUS_LABELS),
+        ("trc", "transaction_status", STREAM_STATUS_LABELS),
+    ):
+        label = _status_label(result.get(key), labels)
+        if label is not None:
+            result[name] = label
+    result["robot_version"] = result.get("rv")
+    result["server_version"] = result.get("sv")
+    matches = same_build(result.get("rv"), result.get("sv"))
+    result["same_build"] = matches
+    result["server_build_differs"] = None if matches is None else not matches
+    result["main_loop_counter"] = result.get("mc")
+    if result.get("dt"):
+        result["dt_iso"] = epoch_ms_to_iso(result["dt"], timezone)
+    if result.get("rvd") is not None:
+        result["rvd_iso"] = epoch_sec_to_iso(result["rvd"], timezone)
+    if result.get("svd") is not None:
+        result["svd_iso"] = epoch_sec_to_iso(result["svd"], timezone)
+    return result
+
+
 def compact_message(row: dict[str, Any], timezone: str) -> dict[str, Any]:
     """Present a ``messages.*`` row with a readable state and ISO time; keeps every original field."""
     result = dict(sanitize_value(row))

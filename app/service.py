@@ -11,8 +11,10 @@ from app.response_v2 import (
     add_iso_times,
     compact_log,
     compact_message,
+    compact_robot_state,
     envelope,
     portfolio_not_found,
+    same_build,
     sanitize_value,
 )
 from app.viking_client import VikingAPIError, VikingClient
@@ -138,6 +140,45 @@ class MarketDataService:
             returned_count=len(items),
             detail_source="robot.subscribe.value.re",
             per_portfolio_reads=0,
+        )
+
+    async def get_robot_status(
+        self,
+        *,
+        robot_id: str,
+        timezone: str = "Europe/Moscow",
+        raw: bool = False,
+    ) -> dict[str, Any]:
+        if not robot_id:
+            raise ValueError("robot_id must not be empty")
+        summary = await self.client.get_robot_portfolio_summary(robot_id=robot_id)
+        state = summary["robot_state"]
+        item = sanitize_value(state) if raw else compact_robot_state(state, timezone)
+        return envelope(
+            [item],
+            notes=[
+                "Robot-level state from robot.subscribe value; per-portfolio trading "
+                "status stays in get_robot_portfolio_trading_status.",
+                "same_build compares rv with sv by common prefix: Viking truncates the "
+                "two strings to different lengths for one build (api.md example: rv "
+                "'ec1d046c', sv 'ec1d046').",
+                "server_build_differs is derived from rv vs sv only. api.md does not "
+                "state that a restart applies sv, so treat it as a signal that the "
+                "server build is not the one running, not as a promise about the next "
+                "restart.",
+                "This is a current-state snapshot: the fact and the time of a restart "
+                "are not derivable from it. mc is the current main-loop counter and is "
+                "comparable only against a value recorded earlier; use robot_logs and "
+                "get_messages_history for restart history.",
+            ],
+            robot_id=robot_id,
+            connected=item.get("rc"),
+            robot_version=item.get("rv"),
+            server_version=item.get("sv"),
+            same_build=same_build(item.get("rv"), item.get("sv")),
+            timezone=timezone,
+            raw=raw,
+            detail_source="robot.subscribe.value",
         )
 
     async def subscribe_available_portfolios(self) -> dict[str, Any]:

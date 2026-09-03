@@ -433,6 +433,16 @@ class VikingClient:
             "unsubscribe_response": unsubscribe_response,
         }
 
+    @staticmethod
+    def _collect_robot_state(value: dict[str, Any]) -> dict[str, Any]:
+        """Return the robot-level part of ``robot.subscribe`` ``value``.
+
+        ``value.re`` is dropped because it is per portfolio and is already presented by
+        ``portfolio_statuses``. Every other key is kept verbatim, including ones the
+        platform may add later.
+        """
+        return {key: item for key, item in value.items() if key != "re"}
+
     async def get_robot_portfolio_summary(self, *, robot_id: str) -> dict[str, Any]:
         """Return all portfolio trading flags from one robot.subscribe snapshot."""
         if not robot_id:
@@ -484,6 +494,7 @@ class VikingClient:
                         "f": free_flag,
                     }
                 )
+            robot_state = self._collect_robot_state(value)
         except BaseException:
             self._subscriptions.pop(subscription_id, None)
             await self.close()
@@ -506,6 +517,7 @@ class VikingClient:
             "expired_portfolios": expired_portfolios,
             "robot_trading_status": trading_status,
             "robot_trading": False if trading_status == 0 else True if trading_status == 2 else None,
+            "robot_state": robot_state,
             "portfolio_statuses": statuses,
             "portfolio_status_count": len(statuses),
             "trading_portfolios": trading_count,

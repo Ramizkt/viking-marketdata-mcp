@@ -23,7 +23,7 @@ Production MCP:
 - health: `https://viking-marketdata-mcp-production.up.railway.app/health`;
 - setup: `https://viking-marketdata-mcp-production.up.railway.app/setup`.
 
-В актуальной версии реализованы 45 MCP-инструментов. Сервер
+В актуальной версии реализованы 46 MCP-инструментов. Сервер
 только читает данные: он не создаёт и не изменяет портфели, не меняет поля, не
 отправляет торговые сигналы и заявки.
 
@@ -221,6 +221,7 @@ Viking credentials в Railway environment и не возвращайте ста�
 | `robot_logs.unsubscribe` | Завершение подписки на логи робота | unsubscribe robot logs |
 | `robot_logs.get_history` | История логов робота в диапазоне `epoch_nsec` | `get_robot_log_history` |
 | `messages.get_history` | Неподавляемые сообщения платформы в диапазоне `epoch_msec` | `get_messages_history` |
+| `robot.subscribe` | Состояние робота: подключение, версия, счётчик цикла | `get_robot_status` |
 | `portfolio_deals.subscribe` | Snapshot и новые сделки портфеля по инструментам | subscribe/get portfolio deal updates |
 | `portfolio_deals.unsubscribe` | Завершение подписки на сделки | unsubscribe portfolio deals |
 | `portfolio_deals.get_previous` | До 100 сделок старше `mt` | `get_previous_portfolio_deals` |
@@ -738,6 +739,17 @@ MCP-инструментов для snapshot/update lifecycle, пагинаци�
 
 - Fast-path invariant: `get_current_portfolio_data` must request the portfolio snapshot directly and must not call `list_portfolios()` before a successful read. The portfolio list may be fetched only after `VikingAPIError` to enrich an accessible-robot `portfolio_not_found` diagnostic; otherwise preserve the original Viking API error.
 
+
+## Robot state
+
+- `get_robot_status(robot_id, timezone="Europe/Moscow", raw=False)` отвечает на вопросы про текущее состояние робота как процесса: жив ли, какая на нём версия, какая сборка на сервере, сколько сейчас намотал главный цикл.
+- Это снимок «сейчас». Факт и время перезапуска из него не выводятся — для них `get_robot_log_history` (строка `Robot was started with version …`) и `get_messages_history`.
+- Источник — тот же `robot.subscribe`, что и у статуса торговли: отдельного запроса нет, `value.re` в ответ не входит.
+- Текущую версию робота не выводить из журнала: строка `Robot was started with version …` относится к прошедшему старту. Обратное тоже верно — факт перезапуска не выводить из `get_robot_status`.
+- `same_build` сравнивает `rv` и `sv` по общему префиксу, а не на равенство: Viking обрезает строки до разной длины для одной сборки (пример из api.md — `rv` `"ec1d046c"`, `sv` `"ec1d046"`). Равенство дало бы ложное «версии разные».
+- `mc` — счётчик главного цикла на момент снимка. Одно значение о перезапусках не говорит ничего: оно сравнимо только с записанным ранее.
+- `server_build_differs` — производный сигнал, а не контракт: `api.md` не обещает, что ближайший рестарт применит `sv`. Означает «на сервере лежит не та сборка, что запущена».
+- `rvd`/`svd` приходят в `epoch_sec`, `-1` означает «неизвестно»; `dt` — в `epoch_msec`, как у `messages.*`, а не в `epoch_nsec`, как у логов.
 
 ## Robot portfolio trading aggregate
 

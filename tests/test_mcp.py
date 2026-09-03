@@ -16,6 +16,7 @@ async def test_mcp_lists_expected_tools():
         "get_portfolio_template",
         "get_current_portfolio_data",
         "get_robot_portfolio_trading_status",
+        "get_robot_status",
         "subscribe_portfolio",
         "get_portfolio_updates",
         "unsubscribe_portfolio",
@@ -60,6 +61,10 @@ async def test_mcp_lists_expected_tools():
     assert tools["get_current_portfolio_data"].annotations.idempotentHint is True
     assert tools["get_robot_portfolio_trading_status"].annotations.idempotentHint is True
     assert tools["get_robot_portfolio_trading_status"].annotations.readOnlyHint is True
+    assert tools["get_robot_status"].annotations.readOnlyHint is True
+    assert tools["get_robot_status"].annotations.idempotentHint is True
+    robot_status_schema = tools["get_robot_status"].inputSchema["properties"]
+    assert set(robot_status_schema) == {"robot_id", "timezone", "raw"}
     schema = tools["get_robot_portfolio_trading_status"].inputSchema["properties"]
     assert "trading_only" in schema
     assert "enabled_only" not in schema
