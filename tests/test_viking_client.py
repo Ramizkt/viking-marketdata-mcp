@@ -1603,3 +1603,324 @@ async def test_get_messages_history_validates_arguments():
     with pytest.raises(ValueError, match="epoch_msec"):
         await client.get_messages_history(mint_ms=-1, maxt_ms=2)
     client.request.assert_not_awaited()
+
+
+async def test_subscribe_messages_accepts_documented_snapshot():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {}
+    client._subscribe = AsyncMock(
+        return_value={
+            "type": "messages.subscribe",
+            "eid": "messages-sub-1",
+            "ts": 909,
+            "r": "s",
+            "data": {
+                "values": [
+                    {"st": 0, "dt": 1722258395158, "msg": "Test msg 1", "dynamic": {"kept": 1}},
+                    {"st": 0, "dt": 1722258376516, "msg": "Test msg 2"},
+                ],
+                "mt": 1721984718924,
+                "count": 2,
+            },
+        }
+    )
+
+    result = await client.subscribe_messages()
+
+    client._subscribe.assert_awaited_once_with("messages.subscribe", {})
+    assert result["subscription_id"] == "messages-sub-1"
+    assert result["active"] is True
+    assert result["message_count"] == 2
+    assert result["max_time"] == 1721984718924
+    assert result["count"] == 2
+    assert result["messages"][0]["dynamic"] == {"kept": 1}
+    assert result["data"]["values"] == result["messages"]
+
+
+async def test_subscribe_messages_accepts_null_max_time_and_empty_snapshot():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {}
+    client._subscribe = AsyncMock(
+        return_value={
+            "type": "messages.subscribe",
+            "eid": "messages-sub-2",
+            "ts": 910,
+            "r": "s",
+            "data": {"values": [], "mt": None, "count": 0},
+        }
+    )
+
+    result = await client.subscribe_messages()
+
+    assert result["message_count"] == 0
+    assert result["max_time"] is None
+    assert result["count"] == 0
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"values": [], "count": 0},
+        {"values": [], "mt": -1, "count": 0},
+        {"values": [], "mt": True, "count": 0},
+        {"values": [], "mt": 1, "count": "2"},
+        {"values": [{"st": 0, "dt": 1}], "mt": 1, "count": 1},
+    ],
+)
+async def test_subscribe_messages_rejects_malformed_snapshot(data):
+    client = object.__new__(VikingClient)
+    client._subscriptions = {"messages-sub-3": _Subscription("messages.subscribe", asyncio.Queue())}
+    client._subscribe = AsyncMock(
+        return_value={
+            "type": "messages.subscribe",
+            "eid": "messages-sub-3",
+            "ts": 911,
+            "r": "s",
+            "data": data,
+        }
+    )
+    client.close = AsyncMock()
+
+    with pytest.raises(VikingProtocolError):
+        await client.subscribe_messages()
+
+    assert "messages-sub-3" not in client._subscriptions
+    client.close.assert_awaited_once()
+
+
+async def test_subscribe_messages_preserves_complete_api_error():
+    client = object.__new__(VikingClient)
+    error = VikingAPIError(
+        "Permission denied",
+        555,
+        response={
+            "type": "messages.subscribe",
+            "eid": "messages-sub-4",
+            "ts": 912,
+            "r": "e",
+            "data": {"msg": "Permission denied", "code": 555},
+        },
+    )
+    client._subscribe = AsyncMock(side_effect=error)
+
+    with pytest.raises(VikingAPIError, match="Permission denied") as raised:
+        await client.subscribe_messages()
+
+    assert raised.value.code == 555
+    assert raised.value.response == error.response
+
+
+async def test_get_messages_updates_accepts_partial_update_rows():
+    client = object.__new__(VikingClient)
+    queue = asyncio.Queue()
+    await queue.put(
+        {
+            "type": "messages.subscribe",
+            "eid": "messages-sub-1",
+            "ts": 913,
+            "r": "u",
+            "data": {"values": [{"msg": "Test msg 1", "st": 1}]},
+        }
+    )
+    await queue.put(
+        {
+            "type": "messages.subscribe",
+            "eid": "messages-sub-1",
+            "ts": 914,
+            "r": "u",
+            "data": {
+                "count": 3,
+                "values": [{"msg": "The robot 1381 will be restarted", "st": 0, "dt": "1788275520000"}],
+            },
+        }
+    )
+    client._subscriptions = {"messages-sub-1": _Subscription("messages.subscribe", queue)}
+
+    result = await client.get_messages_updates("messages-sub-1")
+
+    assert result["event_count"] == 2
+    assert result["active"] is True
+    assert result["more_available"] is False
+    first, second = result["events"]
+    assert first["messages"] == [{"msg": "Test msg 1", "st": 1}]
+    assert "max_time" not in first and "count" not in first
+    assert second["count"] == 3
+    assert second["messages"][0]["dt"] == "1788275520000"
+
+
+async def test_get_messages_updates_respects_max_events_and_reports_more():
+    client = object.__new__(VikingClient)
+    queue = asyncio.Queue()
+    for index in range(3):
+        await queue.put(
+            {
+                "type": "messages.subscribe",
+                "eid": "messages-sub-1",
+                "ts": 915 + index,
+                "r": "u",
+                "data": {"values": [{"msg": f"msg {index}"}]},
+            }
+        )
+    client._subscriptions = {"messages-sub-1": _Subscription("messages.subscribe", queue)}
+
+    result = await client.get_messages_updates("messages-sub-1", max_events=2)
+
+    assert result["event_count"] == 2
+    assert result["more_available"] is True
+
+
+async def test_get_messages_updates_rejects_malformed_row_and_deactivates():
+    client = object.__new__(VikingClient)
+    queue = asyncio.Queue()
+    await queue.put(
+        {
+            "type": "messages.subscribe",
+            "eid": "messages-sub-1",
+            "ts": 918,
+            "r": "u",
+            "data": {"values": [{"st": 1}]},
+        }
+    )
+    client._subscriptions = {"messages-sub-1": _Subscription("messages.subscribe", queue)}
+    client.close = AsyncMock()
+
+    with pytest.raises(VikingProtocolError, match="'msg'"):
+        await client.get_messages_updates("messages-sub-1")
+
+    assert "messages-sub-1" not in client._subscriptions
+    client.close.assert_awaited_once()
+
+
+async def test_get_messages_updates_raises_api_error_and_deactivates():
+    client = object.__new__(VikingClient)
+    queue = asyncio.Queue()
+    response = {
+        "type": "messages.subscribe",
+        "eid": "messages-sub-1",
+        "ts": 919,
+        "r": "e",
+        "data": {"msg": "Permission denied", "code": 555},
+    }
+    await queue.put(response)
+    client._subscriptions = {"messages-sub-1": _Subscription("messages.subscribe", queue)}
+
+    with pytest.raises(VikingAPIError, match="Permission denied") as error:
+        await client.get_messages_updates("messages-sub-1")
+
+    assert error.value.code == 555
+    assert error.value.response == response
+    assert "messages-sub-1" not in client._subscriptions
+
+
+async def test_get_messages_updates_rejects_wrong_subscription_and_overflow():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {
+        "logs-sub-1": _Subscription("robot_logs.subscribe", asyncio.Queue()),
+        "messages-sub-1": _Subscription("messages.subscribe", asyncio.Queue(), overflowed=True),
+    }
+
+    with pytest.raises(ValueError, match="messages.subscribe subscription_id"):
+        await client.get_messages_updates("logs-sub-1")
+    with pytest.raises(VikingProtocolError, match="events were lost"):
+        await client.get_messages_updates("messages-sub-1")
+
+
+async def test_unsubscribe_messages_uses_subscription_eid():
+    client = object.__new__(VikingClient)
+    client._subscriptions = {"messages-sub-1": _Subscription("messages.subscribe", asyncio.Queue())}
+    client.request = AsyncMock(
+        return_value={
+            "type": "messages.unsubscribe",
+            "eid": "q",
+            "ts": 920,
+            "r": "p",
+            "data": {},
+        }
+    )
+
+    result = await client.unsubscribe_messages("messages-sub-1")
+
+    client.request.assert_awaited_once_with("messages.unsubscribe", {"sub_eid": "messages-sub-1"})
+    assert result["unsubscribed"] is True
+    assert result["subscription_id"] == "messages-sub-1"
+    assert "messages-sub-1" not in client._subscriptions
+
+    with pytest.raises(ValueError, match="messages.subscribe subscription_id"):
+        await client.unsubscribe_messages("messages-sub-1")
+
+
+async def test_get_previous_messages_sends_epoch_msec_bound_and_preserves_rows():
+    client = object.__new__(VikingClient)
+    client.request = AsyncMock(
+        return_value={
+            "type": "messages.get_previous",
+            "eid": "messages-previous-1",
+            "ts": 921,
+            "r": "p",
+            "data": {
+                "count": 2,
+                "values": [
+                    {"st": 0, "dt": 1722258395158, "msg": "Test msg 1", "dynamic": {"preserved": True}},
+                    {"st": 1, "dt": "1722258376516", "msg": "Test msg 2"},
+                ],
+            },
+        }
+    )
+
+    result = await client.get_previous_messages(older_than_ms=1722258400000, read=True, limit=50)
+
+    client.request.assert_awaited_once_with(
+        "messages.get_previous",
+        {"mt": 1722258400000, "lim": 50, "read": True},
+    )
+    assert result["result"] == "p"
+    assert result["older_than"] == 1722258400000
+    assert result["count"] == 2
+    assert result["message_count"] == 2
+    assert result["messages"][0]["dynamic"] == {"preserved": True}
+    assert result["messages"][1]["dt"] == "1722258376516"
+
+
+async def test_get_previous_messages_omits_read_flag_by_default_and_accepts_missing_count():
+    client = object.__new__(VikingClient)
+    client.request = AsyncMock(
+        return_value={
+            "type": "messages.get_previous",
+            "eid": "messages-previous-2",
+            "ts": 922,
+            "r": "p",
+            "data": {"values": []},
+        }
+    )
+
+    result = await client.get_previous_messages(older_than_ms=2000000000000)
+
+    client.request.assert_awaited_once_with(
+        "messages.get_previous",
+        {"mt": 2000000000000, "lim": 100},
+    )
+    assert result["count"] is None
+    assert result["messages"] == []
+
+
+async def test_get_previous_messages_validates_arguments_and_result():
+    client = object.__new__(VikingClient)
+    client.request = AsyncMock()
+
+    with pytest.raises(ValueError, match="epoch_msec"):
+        await client.get_previous_messages(older_than_ms=-1)
+    with pytest.raises(ValueError, match="limit"):
+        await client.get_previous_messages(older_than_ms=1, limit=0)
+    client.request.assert_not_awaited()
+
+    client.request = AsyncMock(
+        return_value={
+            "type": "messages.get_previous",
+            "eid": "messages-previous-3",
+            "ts": 923,
+            "r": "s",
+            "data": {"values": []},
+        }
+    )
+    with pytest.raises(VikingProtocolError, match="expected r='p'"):
+        await client.get_previous_messages(older_than_ms=1)

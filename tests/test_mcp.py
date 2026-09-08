@@ -28,6 +28,10 @@ async def test_mcp_lists_expected_tools():
         "unsubscribe_robot_logs",
         "get_robot_log_history",
         "get_messages_history",
+        "subscribe_messages",
+        "get_messages_updates",
+        "unsubscribe_messages",
+        "get_previous_messages",
         "subscribe_portfolio_deals",
         "get_portfolio_deal_updates",
         "unsubscribe_portfolio_deals",
@@ -84,6 +88,14 @@ async def test_mcp_lists_expected_tools():
     messages_schema = tools["get_messages_history"].inputSchema["properties"]
     assert "include_read" in messages_schema
     assert "robot_id" not in messages_schema
+    assert tools["subscribe_messages"].annotations.idempotentHint is False
+    assert tools["subscribe_messages"].inputSchema.get("properties", {}) == {}
+    assert tools["get_messages_updates"].annotations.idempotentHint is False
+    assert tools["unsubscribe_messages"].annotations.idempotentHint is False
+    assert tools["get_previous_messages"].annotations.idempotentHint is True
+    assert tools["get_previous_messages"].annotations.readOnlyHint is True
+    previous_schema = tools["get_previous_messages"].inputSchema["properties"]
+    assert set(previous_schema) == {"older_than", "include_read", "limit", "timezone", "raw"}
     assert tools["subscribe_portfolio_deals"].annotations.idempotentHint is False
     assert tools["get_portfolio_deal_updates"].annotations.idempotentHint is False
     assert tools["unsubscribe_portfolio_deals"].annotations.idempotentHint is False
