@@ -23,7 +23,7 @@ Production MCP:
 - health: `https://viking-marketdata-mcp-production.up.railway.app/health`;
 - setup: `https://viking-marketdata-mcp-production.up.railway.app/setup`.
 
-В актуальной версии реализованы 46 MCP-инструментов. Сервер
+В актуальной версии реализованы 50 MCP-инструментов. Сервер
 только читает данные: он не создаёт и не изменяет портфели, не меняет поля, не
 отправляет торговые сигналы и заявки.
 
@@ -102,7 +102,10 @@ API. История фактически запрашивается через
 - `app/onboarding.py` — страница `/setup`;
 - `tests/test_viking_client.py` — контракт WebSocket-клиента;
 - `tests/test_service.py` — сервисный слой;
-- `tests/test_mcp.py` — внешний MCP-контракт;
+- `tests/test_mcp.py` — внешний MCP-контракт; в нём же
+  `test_documented_tool_count_matches_list_tools` сверяет число инструментов
+  в `README.md` и `AGENTS.md` с фактическим `list_tools()` — при добавлении
+  инструмента обновляйте оба числа;
 - `tests/test_oauth.py` — авторизация и повторный вход;
 - `tests/test_export_store.py` — CSV и подписанные ссылки;
 - `.env.example`, `Dockerfile`, `railway.json`, `README.md` — запуск и deploy;
@@ -449,7 +452,10 @@ timezone="Europe/Moscow", raw=False)`:
 - преобразует границы в целые `mint`/`maxt` формата `epoch_msec` — не
   `epoch_nsec`, как у логов;
 - отправляет `read=true` только при `include_read=True`; по умолчанию Viking
-  возвращает лишь непрочитанные;
+  возвращает лишь непрочитанные, поэтому в инструкциях сервера и описаниях
+  инструментов зафиксировано правило: исторические и ретроспективные вопросы
+  («последнее уведомление о рестарте», «что сообщала платформа вчера») —
+  `include_read=true`; `false` только для «есть ли новые/непрочитанные»;
 - принимает `limit` от 1 до 100 — предел самого API;
 - требует непустой строковый `msg` в каждой строке (это и текст, и уникальный
   ключ), `st` только 0/1, `dt` как integer или digit string; остальные поля
@@ -473,18 +479,24 @@ timezone="Europe/Moscow", raw=False)`:
 - пагинация назад: самое раннее `dt` полученной страницы — `older_than`
   следующего запроса.
 
-`subscribe_messages()`, `get_messages_updates(subscription_id, wait_seconds=0,
-max_events=100)`, `unsubscribe_messages(subscription_id)`:
+`subscribe_messages(timezone="Europe/Moscow")`, `get_messages_updates(subscription_id,
+wait_seconds=0, max_events=100, timezone="Europe/Moscow")`,
+`unsubscribe_messages(subscription_id)`:
 
 - `messages.subscribe` (api.md 11.13.1) с пустым `data`: подписка уровня
   учётной записи, без `r_id`/`p_id`;
 - снапшот `r='s'` обязан содержать `mt` (может быть `null` — база пуста) и
-  список `values`; `count` — число сообщений с `st=1` — принимается, если
-  пришёл;
+  массив `values` — отсутствие или не-массив поднимает `VikingProtocolError`,
+  снапшот без `values` не принимается за пустой; `count` — число сообщений с
+  `st=1` — принимается, если пришёл;
 - обновление `r='u'` несёт ключ `msg` и только изменившиеся поля: у нового
   сообщения есть `st`/`dt`, у смены статуса — только `st`; `mt`/`count` в
   обновлении необязательны, событие сохраняет их, если они есть;
 - строки валидируются тем же `_parse_message_rows`, что и история;
+- сервисный слой (`_normalize_message_event`) приводит `messages` каждого
+  события к схеме истории через `compact_message` (`state`, `dt_iso`) и
+  добавляет `max_time_iso`; `values`/`data` остаются как получены, чтобы
+  потребители Workspace/event-source читали live и history одинаково;
 - очередь событий, `overflowed`, `wait_seconds` 0..30 и `max_events` 1..500 —
   как у подписок на логи; `r='e'` в очереди снимает подписку и поднимает
   `VikingAPIError`, а ошибка формата закрывает соединение;
