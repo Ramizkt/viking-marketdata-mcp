@@ -13,6 +13,7 @@ from app.response_v2 import (
     compact_message,
     compact_robot_state,
     envelope,
+    epoch_ms_to_iso,
     portfolio_not_found,
     same_build,
     sanitize_value,
@@ -417,8 +418,10 @@ class MarketDataService:
             response["raw_response"] = result
         return response
 
-    async def subscribe_messages(self) -> dict[str, Any]:
-        return await self.client.subscribe_messages()
+    async def subscribe_messages(self, *, timezone: str = "Europe/Moscow") -> dict[str, Any]:
+        """Subscribe to platform messages; the snapshot rows use the same schema as history."""
+        result = await self.client.subscribe_messages()
+        return self._normalize_message_event(result, timezone)
 
     async def get_messages_updates(
         self,
@@ -426,12 +429,33 @@ class MarketDataService:
         subscription_id: str,
         wait_seconds: float,
         max_events: int,
+        timezone: str = "Europe/Moscow",
     ) -> dict[str, Any]:
-        return await self.client.get_messages_updates(
+        """Buffered ``messages.subscribe`` events with rows normalized like history."""
+        result = await self.client.get_messages_updates(
             subscription_id,
             wait_seconds=wait_seconds,
             max_events=max_events,
         )
+        result["events"] = [
+            self._normalize_message_event(event, timezone) for event in result.get("events", [])
+        ]
+        return result
+
+    @staticmethod
+    def _normalize_message_event(event: dict[str, Any], timezone: str) -> dict[str, Any]:
+        """Bring one live ``messages.subscribe`` event to the history row schema.
+
+        ``messages`` gets ``state`` / ``dt_iso`` exactly as :func:`compact_message` builds them for
+        ``get_messages_history``; ``values`` and ``data`` stay as received from Viking. ``mt`` is
+        mirrored as ``max_time_iso`` when present. Updates carry only the changed fields of a
+        message, so ``state`` / ``dt_iso`` appear there only when ``st`` / ``dt`` were sent.
+        """
+        event["messages"] = [compact_message(row, timezone) for row in event.get("messages", [])]
+        event["message_count"] = len(event["messages"])
+        if "max_time" in event:
+            event["max_time_iso"] = epoch_ms_to_iso(event["max_time"], timezone)
+        return event
 
     async def unsubscribe_messages(self, *, subscription_id: str) -> dict[str, Any]:
         return await self.client.unsubscribe_messages(subscription_id)

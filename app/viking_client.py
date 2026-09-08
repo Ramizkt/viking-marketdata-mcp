@@ -1178,7 +1178,11 @@ class VikingClient:
         allowed_results: set[str],
         require_snapshot: bool,
     ) -> dict[str, Any]:
-        """Validate one ``messages.subscribe`` snapshot (r='s') or update (r='u')."""
+        """Validate one ``messages.subscribe`` snapshot (r='s') or update (r='u').
+
+        A snapshot must carry ``mt`` and an array ``values`` (api.md 11.13.1); an update may omit
+        ``values`` and delivers only the changed fields of each message.
+        """
         self._validate_response_identity(
             response,
             expected_type="messages.subscribe",
@@ -1207,6 +1211,13 @@ class VikingClient:
             max_time = raw_max_time
         count = self._optional_count(source_data)
 
+        if require_snapshot:
+            if "values" not in source_data:
+                raise VikingProtocolError(
+                    "Response field 'values' is required in the messages snapshot"
+                )
+            if not isinstance(source_data["values"], list):
+                raise VikingProtocolError("Response field 'values' must be an array")
         messages = self._parse_message_rows(source_data.get("values"))
         data = dict(source_data)
         data["values"] = messages
