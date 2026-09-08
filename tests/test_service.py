@@ -380,7 +380,6 @@ async def test_previous_messages_rejects_bad_limit_and_missing_timezone(service)
             "unsubscribe_robot_logs",
             {"subscription_id": "robot-logs-sub-1"},
         ),
-        ("subscribe_messages", "subscribe_messages", {}),
         (
             "unsubscribe_messages",
             "unsubscribe_messages",
@@ -406,7 +405,6 @@ async def test_log_service_methods_delegate(service, service_method, client_meth
     [
         ("get_portfolio_log_updates", "get_portfolio_log_updates"),
         ("get_robot_log_updates", "get_robot_log_updates"),
-        ("get_messages_updates", "get_messages_updates"),
     ],
 )
 async def test_log_update_service_methods_delegate(service, service_method, client_method):
@@ -425,3 +423,82 @@ async def test_log_update_service_methods_delegate(service, service_method, clie
         wait_seconds=3,
         max_events=25,
     )
+
+
+async def test_subscribe_messages_normalizes_snapshot_like_history(service):
+    service.client.subscribe_messages = AsyncMock(
+        return_value={
+            "subscription_id": "messages-sub-1",
+            "active": True,
+            "type": "messages.subscribe",
+            "eid": "messages-sub-1",
+            "ts": 909,
+            "r": "s",
+            "result": "s",
+            "data": {"values": [{"st": 0, "dt": 1788275520000, "msg": "Restart"}], "mt": 1788275520000},
+            "values": [{"st": 0, "dt": 1788275520000, "msg": "Restart"}],
+            "messages": [{"st": 0, "dt": 1788275520000, "msg": "Restart"}],
+            "message_count": 1,
+            "max_time": 1788275520000,
+        }
+    )
+
+    result = await service.subscribe_messages(timezone="Europe/Moscow")
+
+    service.client.subscribe_messages.assert_awaited_once_with()
+    assert result["messages"] == [
+        {
+            "st": 0,
+            "dt": 1788275520000,
+            "msg": "Restart",
+            "state": "unread",
+            "dt_iso": "2026-09-01T18:12:00.000+03:00",
+        }
+    ]
+    assert result["max_time_iso"] == "2026-09-01T18:12:00.000+03:00"
+    assert result["values"] == [{"st": 0, "dt": 1788275520000, "msg": "Restart"}]
+    assert result["data"]["values"] == [{"st": 0, "dt": 1788275520000, "msg": "Restart"}]
+
+
+async def test_get_messages_updates_normalizes_only_received_fields(service):
+    service.client.get_messages_updates = AsyncMock(
+        return_value={
+            "subscription_id": "messages-sub-1",
+            "event_count": 2,
+            "active": True,
+            "more_available": False,
+            "events": [
+                {"r": "u", "messages": [{"msg": "Restart", "st": 1}], "message_count": 1},
+                {
+                    "r": "u",
+                    "messages": [{"msg": "New", "st": 0, "dt": "1788275520000"}],
+                    "message_count": 1,
+                    "max_time": None,
+                },
+            ],
+        }
+    )
+
+    result = await service.get_messages_updates(
+        subscription_id="messages-sub-1",
+        wait_seconds=0,
+        max_events=100,
+        timezone="UTC",
+    )
+
+    service.client.get_messages_updates.assert_awaited_once_with(
+        "messages-sub-1", wait_seconds=0, max_events=100
+    )
+    first, second = result["events"]
+    assert first["messages"] == [{"msg": "Restart", "st": 1, "state": "read"}]
+    assert "max_time_iso" not in first
+    assert second["messages"] == [
+        {
+            "msg": "New",
+            "st": 0,
+            "dt": "1788275520000",
+            "state": "unread",
+            "dt_iso": "2026-09-01T15:12:00.000+00:00",
+        }
+    ]
+    assert second["max_time_iso"] is None

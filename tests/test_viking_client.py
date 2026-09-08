@@ -1661,6 +1661,9 @@ async def test_subscribe_messages_accepts_null_max_time_and_empty_snapshot():
     "data",
     [
         {"values": [], "count": 0},
+        {"mt": 1, "count": 0},
+        {"values": None, "mt": 1, "count": 0},
+        {"values": {"msg": "not an array"}, "mt": 1, "count": 0},
         {"values": [], "mt": -1, "count": 0},
         {"values": [], "mt": True, "count": 0},
         {"values": [], "mt": 1, "count": "2"},
@@ -1746,6 +1749,44 @@ async def test_get_messages_updates_accepts_partial_update_rows():
     assert "max_time" not in first and "count" not in first
     assert second["count"] == 3
     assert second["messages"][0]["dt"] == "1788275520000"
+
+
+async def test_get_messages_updates_accepts_update_without_values_but_not_snapshot():
+    client = object.__new__(VikingClient)
+    queue = asyncio.Queue()
+    await queue.put(
+        {
+            "type": "messages.subscribe",
+            "eid": "messages-sub-1",
+            "ts": 915,
+            "r": "u",
+            "data": {"count": 4},
+        }
+    )
+    client._subscriptions = {"messages-sub-1": _Subscription("messages.subscribe", queue)}
+
+    result = await client.get_messages_updates("messages-sub-1")
+
+    assert result["event_count"] == 1
+    assert result["events"][0]["messages"] == []
+    assert result["events"][0]["count"] == 4
+
+    await queue.put(
+        {
+            "type": "messages.subscribe",
+            "eid": "messages-sub-1",
+            "ts": 916,
+            "r": "s",
+            "data": {"mt": 1, "count": 0},
+        }
+    )
+    client.close = AsyncMock()
+
+    with pytest.raises(VikingProtocolError, match="'values' is required"):
+        await client.get_messages_updates("messages-sub-1")
+
+    assert "messages-sub-1" not in client._subscriptions
+    client.close.assert_awaited_once()
 
 
 async def test_get_messages_updates_respects_max_events_and_reports_more():
