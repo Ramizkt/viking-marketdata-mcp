@@ -13,6 +13,7 @@ from app.response_v2 import (
     compact_message,
     compact_robot_state,
     envelope,
+    epoch_ms_to_iso,
     portfolio_not_found,
     same_build,
     sanitize_value,
@@ -407,6 +408,94 @@ class MarketDataService:
             coverage={
                 "from": date_from.isoformat(),
                 "to": date_to.isoformat(),
+                "tz": timezone,
+            },
+            notes=notes,
+            include_read=include_read,
+            count_in_database=result.get("count"),
+        )
+        if raw:
+            response["raw_response"] = result
+        return response
+
+    async def subscribe_messages(self, *, timezone: str = "Europe/Moscow") -> dict[str, Any]:
+        """Subscribe to platform messages; the snapshot rows use the same schema as history."""
+        result = await self.client.subscribe_messages()
+        return self._normalize_message_event(result, timezone)
+
+    async def get_messages_updates(
+        self,
+        *,
+        subscription_id: str,
+        wait_seconds: float,
+        max_events: int,
+        timezone: str = "Europe/Moscow",
+    ) -> dict[str, Any]:
+        """Buffered ``messages.subscribe`` events with rows normalized like history."""
+        result = await self.client.get_messages_updates(
+            subscription_id,
+            wait_seconds=wait_seconds,
+            max_events=max_events,
+        )
+        result["events"] = [
+            self._normalize_message_event(event, timezone) for event in result.get("events", [])
+        ]
+        return result
+
+    @staticmethod
+    def _normalize_message_event(event: dict[str, Any], timezone: str) -> dict[str, Any]:
+        """Bring one live ``messages.subscribe`` event to the history row schema.
+
+        ``messages`` gets ``state`` / ``dt_iso`` exactly as :func:`compact_message` builds them for
+        ``get_messages_history``; ``values`` and ``data`` stay as received from Viking. ``mt`` is
+        mirrored as ``max_time_iso`` when present. Updates carry only the changed fields of a
+        message, so ``state`` / ``dt_iso`` appear there only when ``st`` / ``dt`` were sent.
+        """
+        event["messages"] = [compact_message(row, timezone) for row in event.get("messages", [])]
+        event["message_count"] = len(event["messages"])
+        if "max_time" in event:
+            event["max_time_iso"] = epoch_ms_to_iso(event["max_time"], timezone)
+        return event
+
+    async def unsubscribe_messages(self, *, subscription_id: str) -> dict[str, Any]:
+        return await self.client.unsubscribe_messages(subscription_id)
+
+    async def get_previous_messages(
+        self,
+        *,
+        older_than: datetime,
+        include_read: bool = False,
+        limit: int = 100,
+        timezone: str = "Europe/Moscow",
+        raw: bool = False,
+    ) -> dict[str, Any]:
+        """Platform messages older than ``older_than`` (``messages.get_previous``).
+
+        Backward pagination companion of :meth:`get_messages_history`: Viking returns a page that
+        ends before the bound, so the smallest ``dt`` of a page is the bound for the next call.
+        """
+        older_than_ms = self._to_epoch_ms(older_than, "older_than")
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be in range 1..100")
+        result = await self.client.get_previous_messages(
+            older_than_ms=older_than_ms,
+            read=include_read,
+            limit=limit,
+        )
+        messages = result["messages"]
+        items = [compact_message(item, timezone) for item in messages]
+        notes: list[str] = []
+        if not items:
+            notes.append(
+                "Сообщений старше указанной даты нет."
+                + ("" if include_read else " Прочитанные сообщения скрыты: include_read=false.")
+            )
+        response = envelope(
+            items,
+            data_status="ok" if items else "no_data_in_range",
+            truncated=len(messages) >= limit,
+            coverage={
+                "older_than": older_than.isoformat(),
                 "tz": timezone,
             },
             notes=notes,

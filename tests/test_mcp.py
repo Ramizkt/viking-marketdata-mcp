@@ -1,6 +1,32 @@
+import re
+from pathlib import Path
+
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from app import main
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DOCUMENTED_TOOL_COUNT_PATTERNS = {
+    "README.md": re.compile(r"Он предоставляет (\d+) инструментов"),
+    "AGENTS.md": re.compile(r"реализованы (\d+) MCP-инструментов"),
+}
+
+
+async def test_documented_tool_count_matches_list_tools():
+    """README.md and AGENTS.md must state the real number of tools exposed by list_tools()."""
+    async with create_connected_server_and_client_session(main.mcp, raise_exceptions=True) as session:
+        result = await session.list_tools()
+    actual = len(result.tools)
+
+    for filename, pattern in DOCUMENTED_TOOL_COUNT_PATTERNS.items():
+        text = (REPO_ROOT / filename).read_text(encoding="utf-8")
+        match = pattern.search(text)
+        assert match, f"{filename} no longer states the tool count with the expected wording"
+        documented = int(match.group(1))
+        assert documented == actual, (
+            f"{filename} documents {documented} tools but list_tools() returns {actual}; "
+            "update the number in the documentation"
+        )
 
 
 async def test_mcp_lists_expected_tools():
@@ -28,6 +54,10 @@ async def test_mcp_lists_expected_tools():
         "unsubscribe_robot_logs",
         "get_robot_log_history",
         "get_messages_history",
+        "subscribe_messages",
+        "get_messages_updates",
+        "unsubscribe_messages",
+        "get_previous_messages",
         "subscribe_portfolio_deals",
         "get_portfolio_deal_updates",
         "unsubscribe_portfolio_deals",
@@ -84,6 +114,17 @@ async def test_mcp_lists_expected_tools():
     messages_schema = tools["get_messages_history"].inputSchema["properties"]
     assert "include_read" in messages_schema
     assert "robot_id" not in messages_schema
+    assert tools["subscribe_messages"].annotations.idempotentHint is False
+    assert set(tools["subscribe_messages"].inputSchema.get("properties", {})) == {"timezone"}
+    assert tools["get_messages_updates"].annotations.idempotentHint is False
+    updates_schema = tools["get_messages_updates"].inputSchema["properties"]
+    assert set(updates_schema) == {"subscription_id", "wait_seconds", "max_events", "timezone"}
+    assert "include_read=true" in main.mcp.instructions
+    assert tools["unsubscribe_messages"].annotations.idempotentHint is False
+    assert tools["get_previous_messages"].annotations.idempotentHint is True
+    assert tools["get_previous_messages"].annotations.readOnlyHint is True
+    previous_schema = tools["get_previous_messages"].inputSchema["properties"]
+    assert set(previous_schema) == {"older_than", "include_read", "limit", "timezone", "raw"}
     assert tools["subscribe_portfolio_deals"].annotations.idempotentHint is False
     assert tools["get_portfolio_deal_updates"].annotations.idempotentHint is False
     assert tools["unsubscribe_portfolio_deals"].annotations.idempotentHint is False

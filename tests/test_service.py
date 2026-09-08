@@ -91,6 +91,18 @@ class FakeClient:
             ],
         }
 
+    async def get_previous_messages(self, **kwargs):
+        return {
+            "older_than": kwargs["older_than_ms"],
+            "read": kwargs["read"],
+            "limit": kwargs["limit"],
+            "count": 1 if kwargs["read"] else None,
+            "message_count": 1 if kwargs["read"] else 0,
+            "messages": (
+                [{"st": 1, "dt": 1788166800000, "msg": "Test msg 2"}] if kwargs["read"] else []
+            ),
+        }
+
 
 @pytest.fixture
 def service(tmp_path):
@@ -306,6 +318,45 @@ async def test_messages_history_rejects_reversed_dates_and_missing_timezone(serv
         )
 
 
+async def test_previous_messages_converts_bound_and_formats_rows(service):
+    result = await service.get_previous_messages(
+        older_than=datetime(2026, 9, 1, 0, 0, 0, 500000, tzinfo=UTC),
+        include_read=True,
+        limit=50,
+        timezone="Europe/Moscow",
+        raw=True,
+    )
+
+    assert result["data_status"] == "ok"
+    assert result["row_count"] == 1
+    assert result["truncated"] is False
+    assert result["include_read"] is True
+    assert result["count_in_database"] == 1
+    assert result["coverage"] == {"older_than": "2026-09-01T00:00:00.500000+00:00", "tz": "Europe/Moscow"}
+    assert result["items"][0]["state"] == "read"
+    assert result["items"][0]["dt_iso"] == "2026-08-31T12:00:00.000+03:00"
+    assert result["raw_response"]["older_than"] == 1788220800500
+    assert result["raw_response"]["read"] is True
+    assert result["raw_response"]["limit"] == 50
+
+
+async def test_previous_messages_reports_empty_page_and_hidden_read(service):
+    result = await service.get_previous_messages(older_than=datetime(2026, 9, 1, tzinfo=UTC))
+
+    assert result["data_status"] == "no_data_in_range"
+    assert result["row_count"] == 0
+    assert result["count_in_database"] is None
+    assert "include_read=false" in result["notes"][0]
+    assert "raw_response" not in result
+
+
+async def test_previous_messages_rejects_bad_limit_and_missing_timezone(service):
+    with pytest.raises(ValueError, match="limit"):
+        await service.get_previous_messages(older_than=datetime(2026, 9, 1, tzinfo=UTC), limit=101)
+    with pytest.raises(ValueError, match="timezone"):
+        await service.get_previous_messages(older_than=datetime(2026, 9, 1))
+
+
 @pytest.mark.parametrize(
     ("service_method", "client_method", "kwargs"),
     [
@@ -328,6 +379,11 @@ async def test_messages_history_rejects_reversed_dates_and_missing_timezone(serv
             "unsubscribe_robot_logs",
             "unsubscribe_robot_logs",
             {"subscription_id": "robot-logs-sub-1"},
+        ),
+        (
+            "unsubscribe_messages",
+            "unsubscribe_messages",
+            {"subscription_id": "messages-sub-1"},
         ),
     ],
 )
@@ -367,3 +423,82 @@ async def test_log_update_service_methods_delegate(service, service_method, clie
         wait_seconds=3,
         max_events=25,
     )
+
+
+async def test_subscribe_messages_normalizes_snapshot_like_history(service):
+    service.client.subscribe_messages = AsyncMock(
+        return_value={
+            "subscription_id": "messages-sub-1",
+            "active": True,
+            "type": "messages.subscribe",
+            "eid": "messages-sub-1",
+            "ts": 909,
+            "r": "s",
+            "result": "s",
+            "data": {"values": [{"st": 0, "dt": 1788275520000, "msg": "Restart"}], "mt": 1788275520000},
+            "values": [{"st": 0, "dt": 1788275520000, "msg": "Restart"}],
+            "messages": [{"st": 0, "dt": 1788275520000, "msg": "Restart"}],
+            "message_count": 1,
+            "max_time": 1788275520000,
+        }
+    )
+
+    result = await service.subscribe_messages(timezone="Europe/Moscow")
+
+    service.client.subscribe_messages.assert_awaited_once_with()
+    assert result["messages"] == [
+        {
+            "st": 0,
+            "dt": 1788275520000,
+            "msg": "Restart",
+            "state": "unread",
+            "dt_iso": "2026-09-01T18:12:00.000+03:00",
+        }
+    ]
+    assert result["max_time_iso"] == "2026-09-01T18:12:00.000+03:00"
+    assert result["values"] == [{"st": 0, "dt": 1788275520000, "msg": "Restart"}]
+    assert result["data"]["values"] == [{"st": 0, "dt": 1788275520000, "msg": "Restart"}]
+
+
+async def test_get_messages_updates_normalizes_only_received_fields(service):
+    service.client.get_messages_updates = AsyncMock(
+        return_value={
+            "subscription_id": "messages-sub-1",
+            "event_count": 2,
+            "active": True,
+            "more_available": False,
+            "events": [
+                {"r": "u", "messages": [{"msg": "Restart", "st": 1}], "message_count": 1},
+                {
+                    "r": "u",
+                    "messages": [{"msg": "New", "st": 0, "dt": "1788275520000"}],
+                    "message_count": 1,
+                    "max_time": None,
+                },
+            ],
+        }
+    )
+
+    result = await service.get_messages_updates(
+        subscription_id="messages-sub-1",
+        wait_seconds=0,
+        max_events=100,
+        timezone="UTC",
+    )
+
+    service.client.get_messages_updates.assert_awaited_once_with(
+        "messages-sub-1", wait_seconds=0, max_events=100
+    )
+    first, second = result["events"]
+    assert first["messages"] == [{"msg": "Restart", "st": 1, "state": "read"}]
+    assert "max_time_iso" not in first
+    assert second["messages"] == [
+        {
+            "msg": "New",
+            "st": 0,
+            "dt": "1788275520000",
+            "state": "unread",
+            "dt_iso": "2026-09-01T15:12:00.000+00:00",
+        }
+    ]
+    assert second["max_time_iso"] is None

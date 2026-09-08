@@ -23,7 +23,7 @@ Production MCP:
 - health: `https://viking-marketdata-mcp-production.up.railway.app/health`;
 - setup: `https://viking-marketdata-mcp-production.up.railway.app/setup`.
 
-В актуальной версии реализованы 46 MCP-инструментов. Сервер
+В актуальной версии реализованы 50 MCP-инструментов. Сервер
 только читает данные: он не создаёт и не изменяет портфели, не меняет поля, не
 отправляет торговые сигналы и заявки.
 
@@ -102,7 +102,10 @@ API. История фактически запрашивается через
 - `app/onboarding.py` — страница `/setup`;
 - `tests/test_viking_client.py` — контракт WebSocket-клиента;
 - `tests/test_service.py` — сервисный слой;
-- `tests/test_mcp.py` — внешний MCP-контракт;
+- `tests/test_mcp.py` — внешний MCP-контракт; в нём же
+  `test_documented_tool_count_matches_list_tools` сверяет число инструментов
+  в `README.md` и `AGENTS.md` с фактическим `list_tools()` — при добавлении
+  инструмента обновляйте оба числа;
 - `tests/test_oauth.py` — авторизация и повторный вход;
 - `tests/test_export_store.py` — CSV и подписанные ссылки;
 - `.env.example`, `Dockerfile`, `railway.json`, `README.md` — запуск и deploy;
@@ -221,6 +224,9 @@ Viking credentials в Railway environment и не возвращайте ста�
 | `robot_logs.unsubscribe` | Завершение подписки на логи робота | unsubscribe robot logs |
 | `robot_logs.get_history` | История логов робота в диапазоне `epoch_nsec` | `get_robot_log_history` |
 | `messages.get_history` | Неподавляемые сообщения платформы в диапазоне `epoch_msec` | `get_messages_history` |
+| `messages.get_previous` | До 100 сообщений платформы старше `mt` (`epoch_msec`) | `get_previous_messages` |
+| `messages.subscribe` | Snapshot непрочитанных сообщений платформы и обновления статусов | subscribe/get messages updates |
+| `messages.unsubscribe` | Завершение подписки на сообщения платформы | unsubscribe messages |
 | `robot.subscribe` | Состояние робота: подключение, версия, счётчик цикла | `get_robot_status` |
 | `portfolio_deals.subscribe` | Snapshot и новые сделки портфеля по инструментам | subscribe/get portfolio deal updates |
 | `portfolio_deals.unsubscribe` | Завершение подписки на сделки | unsubscribe portfolio deals |
@@ -446,7 +452,10 @@ timezone="Europe/Moscow", raw=False)`:
 - преобразует границы в целые `mint`/`maxt` формата `epoch_msec` — не
   `epoch_nsec`, как у логов;
 - отправляет `read=true` только при `include_read=True`; по умолчанию Viking
-  возвращает лишь непрочитанные;
+  возвращает лишь непрочитанные, поэтому в инструкциях сервера и описаниях
+  инструментов зафиксировано правило: исторические и ретроспективные вопросы
+  («последнее уведомление о рестарте», «что сообщала платформа вчера») —
+  `include_read=true`; `false` только для «есть ли новые/непрочитанные»;
 - принимает `limit` от 1 до 100 — предел самого API;
 - требует непустой строковый `msg` в каждой строке (это и текст, и уникальный
   ключ), `st` только 0/1, `dt` как integer или digit string; остальные поля
@@ -455,8 +464,44 @@ timezone="Europe/Moscow", raw=False)`:
   а JSON-пример 11.13.4 его не содержит;
 - в примере запроса 11.13.4 официальной документации фигурируют `mt`/`lim`
   (скопировано из `get_previous`), реализация следует таблице: `mint`/`maxt`;
-- `messages.subscribe`, `messages.get_previous` и write-операция
-  `messages.mark_as_read` не реализованы.
+- write-операция `messages.mark_as_read` не реализована.
+
+`get_previous_messages(older_than, include_read=False, limit=100,
+timezone="Europe/Moscow", raw=False)`:
+
+- вызывает `messages.get_previous` (api.md 11.13.3 «Request Message History»);
+- `older_than` — ISO 8601 с часовым поясом, преобразуется в целый `mt`
+  формата `epoch_msec`; API отдаёт сообщения строго старше него, нижней
+  границы нет, поэтому «последние уведомления» — это `older_than = сейчас`;
+- в примере запроса 11.13.3 `mt` — строка цифр, в таблице — number;
+  реализация отправляет integer, как `mint`/`maxt` в `get_messages_history`;
+- `read`, `lim`, валидация строк и `count` — как у `get_messages_history`;
+- пагинация назад: самое раннее `dt` полученной страницы — `older_than`
+  следующего запроса.
+
+`subscribe_messages(timezone="Europe/Moscow")`, `get_messages_updates(subscription_id,
+wait_seconds=0, max_events=100, timezone="Europe/Moscow")`,
+`unsubscribe_messages(subscription_id)`:
+
+- `messages.subscribe` (api.md 11.13.1) с пустым `data`: подписка уровня
+  учётной записи, без `r_id`/`p_id`;
+- снапшот `r='s'` обязан содержать `mt` (может быть `null` — база пуста) и
+  массив `values` — отсутствие или не-массив поднимает `VikingProtocolError`,
+  снапшот без `values` не принимается за пустой; `count` — число сообщений с
+  `st=1` — принимается, если пришёл;
+- обновление `r='u'` несёт ключ `msg` и только изменившиеся поля: у нового
+  сообщения есть `st`/`dt`, у смены статуса — только `st`; `mt`/`count` в
+  обновлении необязательны, событие сохраняет их, если они есть;
+- строки валидируются тем же `_parse_message_rows`, что и история;
+- сервисный слой (`_normalize_message_event`) приводит `messages` каждого
+  события к схеме истории через `compact_message` (`state`, `dt_iso`) и
+  добавляет `max_time_iso`; `values`/`data` остаются как получены, чтобы
+  потребители Workspace/event-source читали live и history одинаково;
+- очередь событий, `overflowed`, `wait_seconds` 0..30 и `max_events` 1..500 —
+  как у подписок на логи; `r='e'` в очереди снимает подписку и поднимает
+  `VikingAPIError`, а ошибка формата закрывает соединение;
+- `messages.unsubscribe` идёт через общий `_unsubscribe_log_subscription`
+  с `sub_eid` подписки.
 
 Viking фильтрует видимые логи по автору записи и авторизованным email/role.
 При удалении портфеля или робота сервер Viking автоматически отписывает клиента.
