@@ -417,6 +417,71 @@ class MarketDataService:
             response["raw_response"] = result
         return response
 
+    async def subscribe_messages(self) -> dict[str, Any]:
+        return await self.client.subscribe_messages()
+
+    async def get_messages_updates(
+        self,
+        *,
+        subscription_id: str,
+        wait_seconds: float,
+        max_events: int,
+    ) -> dict[str, Any]:
+        return await self.client.get_messages_updates(
+            subscription_id,
+            wait_seconds=wait_seconds,
+            max_events=max_events,
+        )
+
+    async def unsubscribe_messages(self, *, subscription_id: str) -> dict[str, Any]:
+        return await self.client.unsubscribe_messages(subscription_id)
+
+    async def get_previous_messages(
+        self,
+        *,
+        older_than: datetime,
+        include_read: bool = False,
+        limit: int = 100,
+        timezone: str = "Europe/Moscow",
+        raw: bool = False,
+    ) -> dict[str, Any]:
+        """Platform messages older than ``older_than`` (``messages.get_previous``).
+
+        Backward pagination companion of :meth:`get_messages_history`: Viking returns a page that
+        ends before the bound, so the smallest ``dt`` of a page is the bound for the next call.
+        """
+        older_than_ms = self._to_epoch_ms(older_than, "older_than")
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be in range 1..100")
+        result = await self.client.get_previous_messages(
+            older_than_ms=older_than_ms,
+            read=include_read,
+            limit=limit,
+        )
+        messages = result["messages"]
+        items = [compact_message(item, timezone) for item in messages]
+        notes: list[str] = []
+        if not items:
+            notes.append(
+                "Сообщений старше указанной даты нет."
+                + ("" if include_read else " Прочитанные сообщения скрыты: include_read=false.")
+            )
+        response = envelope(
+            items,
+            data_status="ok" if items else "no_data_in_range",
+            truncated=len(messages) >= limit,
+            coverage={
+                "older_than": older_than.isoformat(),
+                "tz": timezone,
+            },
+            notes=notes,
+            include_read=include_read,
+            count_in_database=result.get("count"),
+        )
+        if raw:
+            response["raw_response"] = result
+        return response
+
     async def subscribe_portfolio_deals(
         self, *, robot_id: str, portfolio: str
     ) -> dict[str, Any]:

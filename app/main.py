@@ -69,7 +69,10 @@ mcp = FastMCP(
         "subscribe_robot_logs, get_robot_log_updates и unsubscribe_robot_logs; историю логов "
         "получай через get_robot_log_history. Логи робота не содержат уведомлений платформы "
         "(плановые перезапуски, объявления) — их отдаёт get_messages_history; для вопросов "
-        "«что будет с роботом», «есть ли уведомления» используй его, а не логи. "
+        "«что будет с роботом», «есть ли уведомления» используй его, а не логи. Если дата "
+        "начала неизвестна, бери get_previous_messages — страницу старше заданной даты. Чтобы "
+        "ждать новые уведомления, используй subscribe_messages, get_messages_updates и "
+        "обязательно unsubscribe_messages. "
         "Текущее состояние самого робота — жив ли процесс, какая на нём версия, какая "
         "сборка на сервере, сколько сейчас намотал главный цикл — получай через "
         "get_robot_status. Он отвечает только про «сейчас»: факт и время перезапуска "
@@ -850,6 +853,144 @@ async def get_messages_history(
         )
     except SUBSCRIPTION_ERRORS as exc:
         logger.warning("Messages history request failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=f"Получено сообщений платформы: {result['row_count']}.",
+            )
+        ],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Подписаться на сообщения платформы",
+    description=(
+        "Создаёт read-only подписку Viking messages.subscribe — уведомления платформы "
+        "(плановые перезапуски роботов, объявления) для учётной записи, без robot_id и портфеля. "
+        "Возвращает снапшот непрочитанных сообщений (до 20), max_time, count и subscription_id. "
+        "Обновления приходят при появлении нового сообщения или смене его статуса "
+        "прочитано/непрочитано. Сохрани subscription_id для чтения обновлений и явной отписки."
+    ),
+    annotations=SUBSCRIPTION_TOOL,
+)
+async def subscribe_messages() -> CallToolResult:
+    try:
+        result = await _service_for_request().subscribe_messages()
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Messages subscription failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=(
+                    "Подписка на сообщения платформы создана. "
+                    f"Непрочитанных в снапшоте: {result['message_count']}."
+                ),
+            )
+        ],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Получить новые сообщения платформы",
+    description=(
+        "Возвращает накопленные события активной messages.subscribe. В обновлении Viking "
+        "присылает ключ сообщения msg и только изменившиеся поля (st — статус 0/1, dt — время "
+        "epoch_msec); текст нового сообщения приходит в msg. wait_seconds=0 проверяет сразу, "
+        "максимум ожидания — 30 секунд. После завершения наблюдения вызови unsubscribe_messages."
+    ),
+    annotations=SUBSCRIPTION_TOOL,
+)
+async def get_messages_updates(
+    subscription_id: Annotated[str, Field(min_length=1)],
+    wait_seconds: Annotated[float, Field(ge=0, le=30)] = 0,
+    max_events: Annotated[int, Field(ge=1, le=500)] = 100,
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().get_messages_updates(
+            subscription_id=subscription_id,
+            wait_seconds=wait_seconds,
+            max_events=max_events,
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Reading messages updates failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=(
+                    f"Получено событий сообщений платформы: {result['event_count']}. "
+                    f"Подписка активна: {result['active']}."
+                ),
+            )
+        ],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Отписаться от сообщений платформы",
+    description=(
+        "Вызывает Viking messages.unsubscribe с sub_eid активной подписки "
+        "и возвращает полный ответ API."
+    ),
+    annotations=SUBSCRIPTION_TOOL,
+)
+async def unsubscribe_messages(
+    subscription_id: Annotated[str, Field(min_length=1)],
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().unsubscribe_messages(
+            subscription_id=subscription_id
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Messages unsubscribe failed: %s", exc)
+        return _error_result(exc)
+    return CallToolResult(
+        content=[TextContent(type="text", text="Подписка на сообщения платформы закрыта.")],
+        structuredContent=result,
+    )
+
+
+@mcp.tool(
+    title="Предыдущие сообщения платформы",
+    description=(
+        "Вызывает Viking messages.get_previous — «небольшую» страницу сообщений платформы "
+        "старше указанной даты, без нижней границы. Дополняет get_messages_history: удобно, "
+        "когда дата начала неизвестна — для следующей страницы передай самое раннее dt "
+        "полученной. older_than — ISO 8601 с часовым поясом, преобразуется в epoch_msec. "
+        "По умолчанию только непрочитанные; include_read=true добавляет прочитанные. "
+        "limit от 1 до 100."
+    ),
+    annotations=READ_ONLY,
+)
+async def get_previous_messages(
+    older_than: Annotated[
+        datetime, Field(description="Вернуть сообщения старше этой даты (с часовым поясом)")
+    ],
+    include_read: Annotated[
+        bool, Field(description="Показывать и прочитанные сообщения (Viking read=true)")
+    ] = False,
+    limit: Annotated[int, Field(ge=1, le=100)] = 100,
+    timezone: str = "Europe/Moscow",
+    raw: bool = False,
+) -> CallToolResult:
+    try:
+        result = await _service_for_request().get_previous_messages(
+            older_than=older_than,
+            include_read=include_read,
+            limit=limit,
+            timezone=timezone,
+            raw=raw,
+        )
+    except SUBSCRIPTION_ERRORS as exc:
+        logger.warning("Previous messages request failed: %s", exc)
         return _error_result(exc)
     return CallToolResult(
         content=[

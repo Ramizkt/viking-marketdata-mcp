@@ -1021,6 +1021,219 @@ class VikingClient:
             rows.append(dict(item))
         return rows
 
+    async def subscribe_messages(self) -> dict[str, Any]:
+        """Subscribe to platform messages and return the initial unread snapshot.
+
+        Calls ``messages.subscribe`` (api.md 11.13.1). The subscription is account-level and takes
+        no arguments; the snapshot carries up to 20 unread messages plus ``mt`` (max time written
+        to the database, may be null) and ``count`` (messages with st=1). Updates deliver the
+        message key ``msg`` and only the changed fields, so ``st``/``dt`` are optional there.
+        """
+        response = await self._subscribe("messages.subscribe", {})
+        subscription_id = self._required_str(response, "eid")
+        try:
+            event = self._parse_message_subscription_event(
+                response,
+                subscription_id=subscription_id,
+                allowed_results={"s"},
+                require_snapshot=True,
+            )
+            return {
+                "subscription_id": subscription_id,
+                "active": True,
+                **event,
+            }
+        except BaseException:
+            self._subscriptions.pop(subscription_id, None)
+            await self.close()
+            raise
+
+    async def get_messages_updates(
+        self,
+        subscription_id: str,
+        *,
+        wait_seconds: float = 0,
+        max_events: int = 100,
+    ) -> dict[str, Any]:
+        """Return buffered events for an active ``messages.subscribe`` subscription."""
+        subscription = self._subscriptions.get(subscription_id)
+        if subscription is None or subscription.message_type != "messages.subscribe":
+            raise ValueError("Unknown or inactive messages.subscribe subscription_id")
+        if subscription.overflowed:
+            raise VikingProtocolError(
+                "messages.subscribe buffer overflowed and message events were lost; "
+                "unsubscribe and create a new subscription"
+            )
+        if not 0 <= wait_seconds <= 30:
+            raise ValueError("wait_seconds must be in range 0..30")
+        if not 1 <= max_events <= 500:
+            raise ValueError("max_events must be in range 1..500")
+
+        messages: list[dict[str, Any]] = []
+        if wait_seconds and subscription.queue.empty():
+            with contextlib.suppress(TimeoutError):
+                messages.append(await asyncio.wait_for(subscription.queue.get(), timeout=wait_seconds))
+        while len(messages) < max_events:
+            try:
+                messages.append(subscription.queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+
+        events = []
+        for message in messages:
+            try:
+                self._validate_response_identity(
+                    message,
+                    expected_type="messages.subscribe",
+                    expected_eid=subscription_id,
+                )
+            except VikingProtocolError:
+                self._subscriptions.pop(subscription_id, None)
+                await self.close()
+                raise
+            if message.get("r") == "e":
+                self._subscriptions.pop(subscription_id, None)
+                self._raise_api_error(message)
+            try:
+                event = self._parse_message_subscription_event(
+                    message,
+                    subscription_id=subscription_id,
+                    allowed_results={"s", "u"},
+                    require_snapshot=message.get("r") == "s",
+                )
+            except VikingProtocolError:
+                self._subscriptions.pop(subscription_id, None)
+                await self.close()
+                raise
+            events.append(event)
+
+        active = subscription_id in self._subscriptions
+        return {
+            "subscription_id": subscription_id,
+            "event_count": len(events),
+            "events": events,
+            "active": active,
+            "more_available": active and not subscription.queue.empty(),
+        }
+
+    async def unsubscribe_messages(self, subscription_id: str) -> dict[str, Any]:
+        """Unsubscribe from platform messages (``messages.unsubscribe``)."""
+        return await self._unsubscribe_log_subscription(
+            subscription_id,
+            expected_subscribe_type="messages.subscribe",
+            unsubscribe_type="messages.unsubscribe",
+        )
+
+    async def get_previous_messages(
+        self,
+        *,
+        older_than_ms: int,
+        read: bool = False,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Return platform messages older than an epoch-millisecond bound.
+
+        Calls ``messages.get_previous`` (api.md 11.13.3): a "small" page of history that ends
+        before ``mt``; pass the smallest ``dt`` of the previous page to paginate backwards.
+        Like ``messages.get_history`` it is account-level and returns only unread messages unless
+        ``read`` is true.
+        """
+        self._validate_epoch_msec_bound(older_than_ms, "older_than_ms")
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be in range 1..100")
+
+        request_data: dict[str, Any] = {"mt": older_than_ms, "lim": limit}
+        if read:
+            request_data["read"] = True
+
+        response = await self.request("messages.get_previous", request_data)
+        result = self._required_str(response, "r")
+        if result != "p":
+            raise VikingProtocolError("messages.get_previous returned an unexpected result; expected r='p'")
+        data = self._required_dict(response, "data")
+        messages = self._parse_message_rows(data.get("values"))
+        normalized_data = dict(data)
+        normalized_data["values"] = messages
+        count = self._optional_count(data)
+        return {
+            "type": self._required_str(response, "type"),
+            "eid": self._required_str(response, "eid"),
+            "ts": self._required_int(response, "ts"),
+            "r": result,
+            "result": result,
+            "data": normalized_data,
+            "older_than": older_than_ms,
+            "read": read,
+            "limit": limit,
+            "count": count,
+            "message_count": len(messages),
+            "messages": messages,
+        }
+
+    def _parse_message_subscription_event(
+        self,
+        response: dict[str, Any],
+        *,
+        subscription_id: str,
+        allowed_results: set[str],
+        require_snapshot: bool,
+    ) -> dict[str, Any]:
+        """Validate one ``messages.subscribe`` snapshot (r='s') or update (r='u')."""
+        self._validate_response_identity(
+            response,
+            expected_type="messages.subscribe",
+            expected_eid=subscription_id,
+        )
+        result = self._required_str(response, "r")
+        if result not in allowed_results:
+            expected = ", ".join(repr(item) for item in sorted(allowed_results))
+            raise VikingProtocolError(
+                f"messages.subscribe returned unexpected r={result!r}; expected {expected}"
+            )
+
+        source_data = self._required_dict(response, "data")
+        if require_snapshot and "mt" not in source_data:
+            raise VikingProtocolError("Response field 'mt' is required in the messages snapshot")
+        max_time: int | str | None = None
+        if "mt" in source_data:
+            raw_max_time = source_data.get("mt")
+            if raw_max_time is not None and not (
+                (isinstance(raw_max_time, int) and not isinstance(raw_max_time, bool) and raw_max_time >= 0)
+                or (isinstance(raw_max_time, str) and raw_max_time.isdigit())
+            ):
+                raise VikingProtocolError(
+                    "Response field 'mt' must be null, a non-negative epoch_msec integer or digit string"
+                )
+            max_time = raw_max_time
+        count = self._optional_count(source_data)
+
+        messages = self._parse_message_rows(source_data.get("values"))
+        data = dict(source_data)
+        data["values"] = messages
+        event = {
+            "type": self._required_str(response, "type"),
+            "eid": self._required_str(response, "eid"),
+            "ts": self._required_int(response, "ts"),
+            "r": result,
+            "result": result,
+            "data": data,
+            "values": messages,
+            "messages": messages,
+            "message_count": len(messages),
+        }
+        if "mt" in source_data:
+            event["max_time"] = max_time
+        if count is not None:
+            event["count"] = count
+        return event
+
+    @staticmethod
+    def _optional_count(data: dict[str, Any]) -> int | None:
+        count = data.get("count")
+        if count is not None and (not isinstance(count, int) or isinstance(count, bool)):
+            raise VikingProtocolError("Response field 'count' must be an integer when present")
+        return count
+
     async def subscribe_portfolio_deals(self, *, robot_id: str, portfolio: str) -> dict[str, Any]:
         """Subscribe to portfolio deals and return the initial snapshot."""
         if not robot_id:
