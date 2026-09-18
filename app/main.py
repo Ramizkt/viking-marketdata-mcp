@@ -17,8 +17,9 @@ from starlette.routing import Mount, Route
 
 from app.config import get_settings
 from app.export_store import ExportStore
-from app.oauth import OAUTH_SCOPE, VikingOAuthProvider
+from app.oauth import OAUTH_SCOPE, PORTFOLIO_WRITE_SCOPE, VikingOAuthProvider
 from app.onboarding import setup_page
+from app.portfolio_tools import register_portfolio_control_tools
 from app.service import Aggregation, Delivery, MarketDataService
 from app.viking_client import VikingAPIError, VikingClientPool, VikingProtocolError
 
@@ -101,7 +102,12 @@ mcp = FastMCP(
         "обычно присутствует всегда. Перед подпиской на заявки проверь can_check_pos=true, "
         "перед подпиской на позиции — has_pos=true. Любую подписку подключений, заявок или "
         "позиций обязательно завершай соответствующим unsubscribe-инструментом. "
-        "Если пользователь не назвал поля, используй buy, sell и pos. Сервер только читает данные. "
+        "Если пользователь не назвал поля для чтения, используй buy, sell и pos. "
+        "Запись ограничена uf0..uf19 и остановками. Сначала покажи предпросмотр с точными "
+        "robot_id/portfolio и последствиями; исполняй только явно подтверждённую пользователем "
+        "операцию с dry_run=false, confirm=true. Не расширяй список целей и не заменяй Stop "
+        "на Hard stop или Stop formulas. accepted не доказывает остановку/снятие заявок. "
+        "При outcome_unknown не повторяй запись автоматически. "
         "Credentials не входят в аргументы MCP-инструментов."
     ),
     auth_server_provider=oauth_provider,
@@ -110,7 +116,7 @@ mcp = FastMCP(
         service_documentation_url=AnyHttpUrl(f"{settings.resolved_public_base_url}/setup"),
         client_registration_options=ClientRegistrationOptions(
             enabled=True,
-            valid_scopes=[OAUTH_SCOPE],
+            valid_scopes=[OAUTH_SCOPE, PORTFOLIO_WRITE_SCOPE],
             default_scopes=[OAUTH_SCOPE],
         ),
         required_scopes=[OAUTH_SCOPE],
@@ -179,6 +185,11 @@ def _service_for_request() -> MarketDataService:
     if credentials is None:
         raise RuntimeError("OAuth session is invalid or expired. Authenticate again.")
     return MarketDataService(settings, viking_clients.get(credentials), export_store)
+
+
+register_portfolio_control_tools(
+    mcp, settings=settings, service_factory=lambda: _service_for_request()
+)
 
 
 @mcp.tool(

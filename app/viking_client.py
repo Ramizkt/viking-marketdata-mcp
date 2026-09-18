@@ -118,6 +118,8 @@ class VikingClient:
         self._ws: ClientConnection | None = None
         self._connect_lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
+        self._portfolio_control_lock = asyncio.Lock()
+        self._portfolio_control_next_send_at = 0.0
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._subscriptions: dict[str, _Subscription] = {}
         self._reader_task: asyncio.Task[None] | None = None
@@ -126,6 +128,17 @@ class VikingClient:
     @property
     def connected(self) -> bool:
         return self._ws is not None and self._ws.state is State.OPEN
+
+    async def execute_portfolio_control(
+        self, *, robot_id: str, portfolio: str, action: str,
+        fields: dict[str, Any] | None = None, side: str = "both",
+    ) -> dict[str, Any]:
+        """Allowlisted portfolio writes use a single send, never the retrying read request path."""
+        from app.portfolio_control import send_control_once
+
+        return await send_control_once(
+            self, robot_id=robot_id, portfolio=portfolio, action=action, fields=fields, side=side
+        )
 
     async def authenticate(self) -> None:
         """Validate credentials by completing Viking WebSocket authorization."""

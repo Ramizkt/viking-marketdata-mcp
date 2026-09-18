@@ -4,6 +4,7 @@ from pathlib import Path
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from app import main
+from app.portfolio_tools import WRITE_TOOL_NAMES
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCUMENTED_TOOL_COUNT_PATTERNS = {
@@ -34,6 +35,11 @@ async def test_mcp_lists_expected_tools():
         result = await session.list_tools()
     tools = {tool.name: tool for tool in result.tools}
     assert set(tools) == {
+        "update_portfolio_user_fields",
+        "stop_portfolio_trading",
+        "stop_portfolios",
+        "hard_stop_portfolios",
+        "stop_portfolio_formulas",
         "list_available_portfolios",
         "search_portfolios",
         "subscribe_available_portfolios",
@@ -173,7 +179,8 @@ async def test_mcp_lists_expected_tools():
     assert "всегда используй get_robot_portfolio_trading_status" in current_description
     assert "disabled означает только состояние портфеля" in current_description
     assert all(
-        tool.annotations is not None and tool.annotations.readOnlyHint is True
+        tool.annotations is not None
+        and tool.annotations.readOnlyHint is (tool.name not in WRITE_TOOL_NAMES)
         for tool in tools.values()
     )
     history_schema = tools["get_robot_log_history"].inputSchema["properties"]

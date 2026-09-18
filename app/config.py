@@ -15,6 +15,8 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
+    viking_portfolio_writes_enabled: bool = False
+
     viking_ws_url: str = "wss://bot.fkviking.com/ws"
     viking_request_timeout_seconds: float = Field(default=45.0, gt=1, le=300)
     credentials_idle_ttl_seconds: int = Field(default=900, ge=60, le=86_400)
