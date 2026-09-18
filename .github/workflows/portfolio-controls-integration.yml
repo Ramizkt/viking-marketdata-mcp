@@ -21,7 +21,7 @@ jobs:
           python-version: '3.12'
           enable-cache: false
       - name: Apply reviewed integration
-        run: python scripts/integrate_portfolio_controls.py
+        run: python scripts/refine_portfolio_controls.py
       - name: Install locked dependencies
         run: uv sync --locked
       - name: Format only new modules and sort touched imports
