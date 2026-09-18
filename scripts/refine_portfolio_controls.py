@@ -22,8 +22,7 @@ s = s.replace('''        if PORTFOLIO_WRITE_SCOPE in (pending.params.scopes or [
 p.write_text(s)
 
 p = Path("app/portfolio_control.py")
-s = p.read_text()
-s = s.replace("import asyncio\n", "import asyncio\nimport contextlib\n")
+s = p.read_text().replace("import asyncio\n", "import asyncio\nimport contextlib\n")
 s = s.replace('''            await client.close()
             raise''', '''            with contextlib.suppress(Exception):
                 await client.close()
@@ -66,5 +65,81 @@ p = Path("AGENTS.md")
 s = p.read_text().replace("аргументы, read-only annotations, понятное описание", "аргументы, корректные annotations, понятное описание")
 s = s.replace("- внешний MCP tool schema и read-only annotation.",
               "- внешний MCP tool schema и корректные read/write annotations.")
+p.write_text(s)
+
+p = Path("tests/test_mcp.py")
+s = p.read_text().replace("from app import main\n", "from app import main\nfrom app.portfolio_tools import WRITE_TOOL_NAMES\n")
+s = s.replace(
+    "tool.annotations is not None and tool.annotations.readOnlyHint is True\n        for tool in tools.values()",
+    "tool.annotations is not None\n        and tool.annotations.readOnlyHint is (tool.name not in WRITE_TOOL_NAMES)\n        for tool in tools.values()",
+)
+p.write_text(s)
+
+p = Path("tests/test_portfolio_controls.py")
+s = p.read_text().replace("from types import SimpleNamespace", "import asyncio\n\nfrom types import SimpleNamespace")
+if "test_mcp_field_patch_survives_schema_validation" not in s:
+    s += '''
+
+async def test_mcp_field_patch_survives_schema_validation(client, monkeypatch):
+    monkeypatch.setattr(main.settings, "viking_portfolio_writes_enabled", False)
+    monkeypatch.setattr(main, "_service_for_request", lambda: SimpleNamespace(client=client))
+    async with create_connected_server_and_client_session(main.mcp, raise_exceptions=True) as session:
+        result = await session.call_tool("update_portfolio_user_fields", {
+            **TARGET, "fields": {"uf0": 0, "uf1": {"c": ""}, "uf19": {"v": -1.5, "c": "test"}},
+        })
+    assert result.isError is False
+    assert result.structuredContent["status"] == "preview"
+    patch = result.structuredContent["items"][0]["request"]["data"]["portfolio"]
+    assert patch == {"name": TARGET["portfolio"], "uf0": {"v": 0}, "uf1": {"c": ""},
+                     "uf19": {"v": -1.5, "c": "test"}}
+    client._request_connected.assert_not_awaited()
+
+
+@pytest.mark.parametrize("fields", [{"uf0": True}, {"uf0": "12"}, {"uf0": {"v": False}}, {"uf20": 1}])
+async def test_mcp_field_schema_does_not_coerce_invalid_values(client, monkeypatch, fields):
+    monkeypatch.setattr(main, "_service_for_request", lambda: SimpleNamespace(client=client))
+    async with create_connected_server_and_client_session(main.mcp, raise_exceptions=True) as session:
+        result = await session.call_tool("update_portfolio_user_fields", {**TARGET, "fields": fields})
+    assert result.isError is True
+    client._request_connected.assert_not_awaited()
+
+
+async def test_user_field_execution_sends_only_patch(client):
+    result = await PortfolioControlService(client).run(
+        targets=[TARGET], action="user_fields", fields={"uf0": {"c": "x"}}, dry_run=False, confirm=True
+    )
+    assert result["status"] == "accepted"
+    assert client._request_connected.await_args.args == (
+        "portfolio.update", {"r_id": TARGET["robot_id"],
+                             "portfolio": {"name": TARGET["portfolio"], "uf0": {"c": "x"}}}
+    )
+    client.get_portfolio_template.assert_awaited_once_with(**TARGET)
+
+
+async def test_cancellation_after_send_never_replays(client):
+    client._request_connected.side_effect = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        await client.execute_portfolio_control(**TARGET, action="stop")
+    assert client._request_connected.await_count == 1
+    client.request.assert_not_called()
+    client.close.assert_awaited_once()
+
+
+async def test_cleanup_failure_does_not_hide_unknown_outcome(client):
+    client._request_connected.side_effect = TimeoutError("fixture")
+    client.close.side_effect = ConnectionError("fixture cleanup")
+    with pytest.raises(WriteOutcomeUnknown):
+        await client.execute_portfolio_control(**TARGET, action="stop")
+    assert client._request_connected.await_count == 1
+
+
+async def test_oversized_batch_rejected_before_any_write(client):
+    targets = [{"robot_id": "test-robot", "portfolio": f"test-{i}"} for i in range(201)]
+    with pytest.raises(ValueError):
+        await PortfolioControlService(client).run(
+            targets=targets, action="stop", dry_run=False, confirm=True
+        )
+    client._request_connected.assert_not_awaited()
+'''
 p.write_text(s)
 print("Refinements applied; no live portfolio calls were made.")
