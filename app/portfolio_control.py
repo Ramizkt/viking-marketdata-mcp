@@ -1,7 +1,9 @@
 """Allowlisted portfolio writes; acknowledgements are not trading-state verification."""
+
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import re
 from time import monotonic
@@ -81,7 +83,9 @@ def validate_user_field_template(fields: dict[str, dict[str, Any]], resolved: di
     if not isinstance(template, dict) or not isinstance(resolved.get("template_id"), str):
         raise VikingProtocolError("Missing portfolio template identity")
     if template.get("template_id") != resolved["template_id"]:
-        raise VikingProtocolError("Returned portfolio template identity does not match the requested template")
+        raise VikingProtocolError(
+            "Returned portfolio template identity does not match the requested template"
+        )
     sections = resolved.get("template_fields")
     entries = sections.get("portfolio") if isinstance(sections, dict) else None
     if not isinstance(entries, list):
@@ -95,7 +99,13 @@ def validate_user_field_template(fields: dict[str, dict[str, Any]], resolved: di
             raise ValueError(f"{key} is not editable in the current portfolio template")
         if "v" in patch:
             low, high = spec.get("min"), spec.get("max")
-            if any(type(x) not in (int, float) or (isinstance(x, float) and not math.isfinite(x)) for x in (low, high)) or low > high:
+            if (
+                any(
+                    type(x) not in (int, float) or (isinstance(x, float) and not math.isfinite(x))
+                    for x in (low, high)
+                )
+                or low > high
+            ):
                 raise VikingProtocolError(f"Template has invalid numeric bounds for {key}")
             if not low <= patch["v"] <= high:
                 raise ValueError(f"{key}.v must be in the template range {low}..{high}")
@@ -111,7 +121,9 @@ def validate_controls(dry_run: bool, confirm: bool) -> None:
     if type(dry_run) is not bool or type(confirm) is not bool:
         raise ValueError("dry_run and confirm must be JSON booleans")
     if not dry_run and not confirm:
-        raise ValueError("Execution requires dry_run=false and confirm=true for the exact requested operation")
+        raise ValueError(
+            "Execution requires dry_run=false and confirm=true for the exact requested operation"
+        )
 
 
 def command_for(
@@ -153,8 +165,13 @@ class WriteNotSent(RuntimeError):
 
 
 async def send_control_once(
-    client: VikingClient, *, robot_id: str, portfolio: str, action: Action,
-    fields: Any = None, side: Side = "both",
+    client: VikingClient,
+    *,
+    robot_id: str,
+    portfolio: str,
+    action: Action,
+    fields: Any = None,
+    side: Side = "both",
 ) -> dict[str, Any]:
     """Separate transport from read retry: one send, strict acknowledgement, no automatic replay."""
     target = PortfolioTarget(robot_id=robot_id, portfolio=portfolio)
@@ -183,10 +200,12 @@ async def send_control_once(
         except VikingAPIError:
             raise
         except asyncio.CancelledError:
-            await client.close()
+            with contextlib.suppress(Exception):
+                await client.close()
             raise
         except Exception as exc:
-            await client.close()
+            with contextlib.suppress(Exception):
+                await client.close()
             raise WriteOutcomeUnknown(exc, response) from exc
         return response
 
@@ -194,7 +213,7 @@ async def send_control_once(
 NOTES = {
     "user_fields": [
         "Only supplied uf0..uf19 v/c subkeys are patched. User fields can affect trading formulas.",
-        "Read back the affected fields with get_current_portfolio_data; a write acknowledgement is not readback.",
+        "Read back fields with get_current_portfolio_data; acknowledgement is not readback.",
     ],
     "stop": [
         "Only the selected re_sell/re_buy flags are set to false; no flags are enabled.",
@@ -203,10 +222,10 @@ NOTES = {
     ],
     "hard_stop": [
         "Hard stop disables both re flags and timetable, and attempts cancellation on both legs.",
-        "Formulas remain active and may re-enable trading. Use Stop formulas only on explicit user instruction.",
+        "Formulas can re-enable trading. Stop formulas requires a separate explicit user instruction.",
     ],
     "stop_formulas": [
-        "Stop formulas also disables formula calculations and changes formula-driven modes to constants/Standard.",
+        "Stop formulas disables formulas and changes formula-driven modes to constants/Standard.",
         "Re-enabling formulas later is manual. This command attempts cancellation on both legs.",
     ],
 }
@@ -227,8 +246,14 @@ class PortfolioControlService:
         self.client = client
 
     async def run(
-        self, *, targets: list[PortfolioTarget | dict[str, str]], action: Action,
-        fields: Any = None, side: Side = "both", dry_run: bool = True, confirm: bool = False,
+        self,
+        *,
+        targets: list[PortfolioTarget | dict[str, str]],
+        action: Action,
+        fields: Any = None,
+        side: Side = "both",
+        dry_run: bool = True,
+        confirm: bool = False,
     ) -> dict[str, Any]:
         validate_controls(dry_run, confirm)
         if not isinstance(targets, list) or not 1 <= len(targets) <= MAX_TARGETS:
@@ -252,7 +277,9 @@ class PortfolioControlService:
             if dry_run:
                 item.update(status="preview", request={"type": message_type, "data": data})
             elif interrupted:
-                item.update(status="not_sent", reason="Batch interrupted after a transport failure; not retried")
+                item.update(
+                    status="not_sent", reason="Batch interrupted after a transport failure; not retried"
+                )
             else:
                 try:
                     ack = await self.client.execute_portfolio_control(
@@ -273,13 +300,18 @@ class PortfolioControlService:
         has_errors = any(counts[s] for s in ("rejected", "outcome_unknown", "not_sent"))
         return {
             "status": "preview" if dry_run else ("partial_failure" if has_errors else "accepted"),
-            "data_status": "present", "items": items, "counts": counts, "has_errors": has_errors,
-            "dry_run": dry_run, "atomic": False, "automatic_retry": False,
+            "data_status": "present",
+            "items": items,
+            "counts": counts,
+            "has_errors": has_errors,
+            "dry_run": dry_run,
+            "atomic": False,
+            "automatic_retry": False,
             "notes": [
                 *NOTES[action],
-                "Accepted means Viking acknowledged the command, not verified trading state or exchange cancellation.",
-                "Use get_robot_portfolio_trading_status for trading state and order subscriptions for active orders.",
-                "Stop operations do not close positions. No automatic rollback or replay is performed.",
-                "Preview is not a reservation: permissions, templates and portfolio state can change before execution.",
+                "Accepted means API acknowledgement, not verified trading state or exchange cancellation.",
+                "Verify trading via get_robot_portfolio_trading_status and active orders via subscriptions.",
+                "Stops do not send position-closing commands. No automatic rollback or replay is performed.",
+                "Preview is not a reservation: permissions, templates and state may change before execution.",
             ],
         }

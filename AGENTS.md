@@ -6,8 +6,9 @@
 
 ## 1. Назначение и текущее состояние
 
-`viking-marketdata-mcp` — публичный многопользовательский read-only MCP-сервер
-поверх WebSocket API `bot.fkviking.com`.
+`viking-marketdata-mcp` — публичный многопользовательский MCP-сервер чтения данных
+с отдельным разрешением на ограниченные операции управления портфелями поверх
+WebSocket API `bot.fkviking.com`.
 
 Репозиторий:
 <https://github.com/Ramizkt/viking-marketdata-mcp>
@@ -23,9 +24,10 @@ Production MCP:
 - health: `https://viking-marketdata-mcp-production.up.railway.app/health`;
 - setup: `https://viking-marketdata-mcp-production.up.railway.app/setup`.
 
-В актуальной версии реализованы 50 MCP-инструментов. Сервер
-только читает данные: он не создаёт и не изменяет портфели, не меняет поля, не
-отправляет торговые сигналы и заявки.
+В актуальной версии реализованы 55 MCP-инструментов: 50 инструментов чтения и
+5 отдельно разрешаемых инструментов изменения uf0–uf19 и остановки портфелей.
+Сервер не создаёт портфели, не включает торговлю, не выставляет заявки и не
+отправляет торговые сигналы. Hard stop/Stop formulas могут снимать существующие заявки.
 
 ## 2. Источники истины
 
@@ -118,7 +120,7 @@ API. История фактически запрашивается через
 
 ### Прямое выполнение read-only MCP-запросов
 
-Все инструменты этого MCP являются read-only. Если пользовательская задача может быть
+Прежние 50 инструментов этого MCP остаются read-only. Если пользовательская задача может быть
 выполнена одним или несколькими инструментами Viking MCP, агент должен вызывать их
 напрямую в текущем агенте. Нельзя создавать subagent/дочерний Codex и нельзя запускать
 `codex exec`, Terminal, shell или другую локальную команду только как прокси для этих
@@ -617,7 +619,7 @@ number. Фильтр `security_key` передаётся в Viking как `sec_k
    ответа, API errors, protocol errors, reconnect/subscription lifecycle и
    сохранение динамических полей.
 6. **Сервис и MCP-контракт** — добавить метод `MarketDataService`, типизированные
-   аргументы, read-only annotations, понятное описание и безопасный результат.
+   аргументы, корректные annotations, понятное описание и безопасный результат.
 7. **Проверка и документация** — добавить тесты клиента, сервиса и MCP, при
    необходимости OAuth/export regression; обновить `README.md` и этот файл;
    выполнить `uv run ruff check .` и `uv run pytest -q`.
@@ -678,7 +680,7 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 - динамические дополнительные поля без потерь;
 - timeout/disconnect;
 - snapshot/update/unsubscribe и overflow для подписок;
-- внешний MCP tool schema и read-only annotation.
+- внешний MCP tool schema и корректные read/write annotations.
 
 Сохраняйте async-архитектуру и type hints. Не выполняйте крупный рефакторинг
 одновременно с добавлением API-метода без отдельного согласования.
@@ -804,3 +806,55 @@ MCP-инструментов для snapshot/update lifecycle, пагинаци�
 - Не использовать `portfolio.disabled`, `p_d` или `p_a - p_d` для определения торговли.
 - Не делать `available_portfolio_list.subscribe` или fan-out `portfolio.subscribe`: массив `re` всегда приходит целиком в одном snapshot.
 - После snapshot выполнить `robot.unsubscribe`.
+
+
+## Portfolio controls: явное исключение из read-only (2026-09-18)
+
+Эта секция заменяет прежний общий запрет на изменение полей **только** для пяти
+перечисленных инструментов. Прочие ограничения и 50 read-only инструментов неизменны.
+
+- `update_portfolio_user_fields`: `portfolio.update`, `data.r_id`,
+  `data.portfolio.name`, только `uf0`–`uf19`, частичные `{v,c}`. До записи:
+  `get_template_id` → `get_template_by_id`, проверка ID, editor/disabled, min/max,
+  UTF-8 max_len. Не сливать patch со snapshot, не передавать securities.
+- `stop_portfolio_trading`: `portfolio.update` только re_sell/re_buy=false,
+  side=both/sell/buy. Нельзя передавать true или другие поля.
+- `stop_portfolios`: те же два false по каждой явно указанной цели.
+- `hard_stop_portfolios`: `portfolio.hard_stop`, data={r_id,p_id}.
+  В API-примере встречается опечатка `portfolio.hasrd_stop`: не использовать её.
+- `stop_portfolio_formulas`: `portfolio.formulas_stop`, data={r_id,p_id}.
+
+Архитектура записи: `app/portfolio_tools.py` → `PortfolioControlService` в
+`app/portfolio_control.py` → `VikingClient.execute_portfolio_control` →
+`send_control_once` → `_request_connected`. Пул соединений тот же; credential data
+не появляются в аргументах инструментов. Для записи нельзя использовать
+`VikingClient.request`: он повторяет запросы чтения при ошибке транспорта.
+
+Защита: серверный флаг `VIKING_PORTFOLIO_WRITES_ENABLED` по умолчанию false;
+отдельный scope `viking.portfolio.write` вместе с `viking.read`; явное согласие
+на OAuth-странице; dry_run=true по умолчанию; исполнение только при строгих JSON
+boolean dry_run=false и confirm=true. Старые grants и refresh не повышают права.
+MCP annotations: readOnlyHint=false, destructiveHint=true, idempotentHint=false,
+openWorldHint=true. Не снимать подтверждения для mutating-инструментов ради удобства.
+
+Сначала показать точный план и последствия и получить согласие пользователя.
+Не расширять цели и не усиливать Stop до Hard stop/Stop formulas автоматически.
+Вызов confirm=true сам по себе не удостоверяет согласие человека. Stop formulas
+может менять режимы формул; восстановление не автоматическое. Не применять disabled
+как способ остановки торговли. Не отправлять команды закрытия позиции.
+
+Пакеты: явный список 1..200 уникальных пар robot_id/portfolio, весь список
+валидируется до отправки. Последовательные sends, локальный предел 10/с на
+credentials, без атомарности/rollback. API rejection сохраняется вместе с code
+и response; дальнейшие цели обрабатываются. При транспортном сбое текущая цель
+outcome_unknown (или not_sent при провале подключения до send), остальные not_sent.
+Автоповтора нет; cancellation после начала send тоже не даёт основания повторять.
+Ответ r=p/accepted — только API acknowledgement; проверять type, eid, ts, r и
+r_id/p_id. verified=false до отдельной проверки. Состояние торговли определять
+через robot.subscribe / get_robot_portfolio_trading_status, а не disabled.
+
+Проверки: `tests/test_portfolio_controls.py`, `tests/test_portfolio_control_oauth.py`;
+полный `uv run pytest -q`, `uv run ruff check app tests`. README и число 55 инструментов
+обязательны для этой поставки. Live-проверки остановок разрешены только на явно
+выбранных пользователем тестовых портфелях. Этот PR сам по себе не разрешает merge,
+production deploy или реальные операции с портфелями.

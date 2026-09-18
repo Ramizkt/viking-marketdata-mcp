@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 CredentialMode = Literal["session", "local"]
 OAUTH_SCOPE = "viking.read"
+PORTFOLIO_WRITE_SCOPE = "viking.portfolio.write"
 TOKEN_AAD = b"viking-marketdata-mcp-token-v1"
 
 
@@ -167,6 +168,16 @@ class VikingOAuthProvider(
     ) -> str:
         if not client.client_id:
             raise AuthorizeError("invalid_request", "client_id is required")
+        requested_scopes = set(params.scopes or [OAUTH_SCOPE])
+        registered_scopes = set((client.scope or OAUTH_SCOPE).split())
+        if (
+            OAUTH_SCOPE not in requested_scopes
+            or not requested_scopes.issubset({OAUTH_SCOPE, PORTFOLIO_WRITE_SCOPE})
+            or not requested_scopes.issubset(registered_scopes)
+        ):
+            raise AuthorizeError("invalid_scope", "Requested scope is not registered for this client")
+        if PORTFOLIO_WRITE_SCOPE in requested_scopes and not self.settings.viking_portfolio_writes_enabled:
+            raise AuthorizeError("invalid_scope", "Portfolio writes are disabled by the server administrator")
         recovered_client = None
         if isinstance(client, RecoverableOAuthClient):
             recovered_client = OAuthClientInformationFull(
@@ -367,6 +378,15 @@ class VikingOAuthProvider(
                 email=email,
                 role=role,
                 error="Заполните email и API key.",
+            )
+
+        if PORTFOLIO_WRITE_SCOPE in (pending.params.scopes or []) and (
+            not self.settings.viking_portfolio_writes_enabled
+            or form.get("allow_portfolio_writes") != "yes"
+        ):
+            return self._render_page(
+                pending_id, selected_mode=mode, email=email, role=role,
+                error="Нужно отдельное явное разрешение на изменение полей и остановки портфелей.",
             )
 
         credentials = VikingCredentials(email=email, api_key=api_key, role=role)
@@ -623,6 +643,17 @@ class VikingOAuthProvider(
         error: str = "",
         disabled: bool = False,
     ) -> HTMLResponse:
+        pending = self._pending.get(pending_id)
+        write_requested = pending is not None and PORTFOLIO_WRITE_SCOPE in (pending.params.scopes or [])
+        write_consent_html = ""
+        if write_requested:
+            write_consent_html = (
+                '<div class="error">Клиент запрашивает изменение uf0–uf19 и остановку торговли. '
+                'Stop formulas также отключает формулы. Эти операции могут влиять на торговлю.</div>'
+                '<label><input type="checkbox" name="allow_portfolio_writes" value="yes" '
+                'style="width:auto" required> Разрешаю изменение пользовательских полей и остановки '
+                'портфелей через этот MCP-клиент (viking.portfolio.write).</label>'
+            )
         selected_json = json.dumps(selected_mode)
         error_html = f'<div class="error">{html.escape(error)}</div>' if error else ""
         disabled_attr = " disabled" if disabled else ""
@@ -683,6 +714,7 @@ class VikingOAuthProvider(
     <input id="api_key" name="api_key" type="password" autocomplete="off" required>
     <label for="role">Role</label>
     <input id="role" name="role" value="{html.escape(role)}" required>
+    {write_consent_html}
     <button class="submit" type="submit">Подключить</button>
   </form>
   <p class="security">API key не передаётся модели и не записывается в логи.</p>

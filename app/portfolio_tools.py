@@ -1,4 +1,5 @@
 """MCP entry points for the narrowly allowlisted portfolio controls."""
+
 from __future__ import annotations
 
 import json
@@ -24,13 +25,16 @@ from app.service import MarketDataService
 from app.viking_client import VikingAPIError
 
 Targets = Annotated[list[PortfolioTarget], Field(min_length=1, max_length=MAX_TARGETS)]
-WRITE_TOOL_NAMES = frozenset({
-    "update_portfolio_user_fields", "stop_portfolio_trading", "stop_portfolios",
-    "hard_stop_portfolios", "stop_portfolio_formulas",
-})
-WRITE = ToolAnnotations(
-    readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True
+WRITE_TOOL_NAMES = frozenset(
+    {
+        "update_portfolio_user_fields",
+        "stop_portfolio_trading",
+        "stop_portfolios",
+        "hard_stop_portfolios",
+        "stop_portfolio_formulas",
+    }
 )
+WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True)
 COMMON = (
     " По умолчанию dry_run=true: только предпросмотр без изменений. Исполнение требует "
     "dry_run=false, confirm=true и отдельного OAuth-разрешения viking.portfolio.write. "
@@ -53,7 +57,7 @@ def register_portfolio_control_tools(
                 if token is None or PORTFOLIO_WRITE_SCOPE not in token.scopes:
                     raise PermissionError(
                         "This OAuth grant is read-only. Reauthorize with viking.portfolio.write "
-                        "and explicitly consent in the browser. Existing grants are not upgraded automatically."
+                        "and consent in the browser. Old grants are not upgraded automatically."
                     )
             service = service_factory()
             result = await PortfolioControlService(service.client).run(
@@ -70,7 +74,8 @@ def register_portfolio_control_tools(
                 result.update(code=exc.code, api_response=exc.response)
             return CallToolResult(
                 content=[TextContent(type="text", text=json.dumps(result, ensure_ascii=False))],
-                structuredContent=result, isError=True,
+                structuredContent=result,
+                isError=True,
             )
 
     @mcp.tool(
@@ -81,15 +86,22 @@ def register_portfolio_control_tools(
             "Ограничения и редактируемость проверяются по актуальному шаблону. "
             "Пользовательские поля могут влиять на торговые формулы. "
             "После записи проверь нужные поля через get_current_portfolio_data." + COMMON
-        ), annotations=WRITE,
+        ),
+        annotations=WRITE,
     )
     async def update_portfolio_user_fields(
-        robot_id: str, portfolio: str, fields: UserFields,
-        dry_run: StrictBool = True, confirm: StrictBool = False,
+        robot_id: str,
+        portfolio: str,
+        fields: UserFields,
+        dry_run: StrictBool = True,
+        confirm: StrictBool = False,
     ) -> CallToolResult:
         return await run(
-            targets=[{"robot_id": robot_id, "portfolio": portfolio}], action="user_fields",
-            fields=fields, dry_run=dry_run, confirm=confirm,
+            targets=[{"robot_id": robot_id, "portfolio": portfolio}],
+            action="user_fields",
+            fields=fields,
+            dry_run=dry_run,
+            confirm=confirm,
         )
 
     @mcp.tool(
@@ -98,15 +110,22 @@ def register_portfolio_control_tools(
             "Устанавливает только re_sell=false и/или re_buy=false: side=both, sell или buy. "
             "Никогда не включает торговлю. Расписание и формулы не отключаются и могут снова "
             "изменить флаги. Не эквивалентно Hard stop или Stop formulas." + COMMON
-        ), annotations=WRITE,
+        ),
+        annotations=WRITE,
     )
     async def stop_portfolio_trading(
-        robot_id: str, portfolio: str, side: Side = "both",
-        dry_run: StrictBool = True, confirm: StrictBool = False,
+        robot_id: str,
+        portfolio: str,
+        side: Side = "both",
+        dry_run: StrictBool = True,
+        confirm: StrictBool = False,
     ) -> CallToolResult:
         return await run(
-            targets=[{"robot_id": robot_id, "portfolio": portfolio}], action="stop", side=side,
-            dry_run=dry_run, confirm=confirm,
+            targets=[{"robot_id": robot_id, "portfolio": portfolio}],
+            action="stop",
+            side=side,
+            dry_run=dry_run,
+            confirm=confirm,
         )
 
     @mcp.tool(
@@ -116,10 +135,13 @@ def register_portfolio_control_tools(
             "Заявки второй ноги продолжают работать. Расписание и формулы не отключаются. "
             "До 200 точных пар robot_id/portfolio, без wildcard и дубликатов. Пакет не атомарный; "
             "для каждого портфеля возвращается отдельный результат. Позиции не закрываются." + COMMON
-        ), annotations=WRITE,
+        ),
+        annotations=WRITE,
     )
     async def stop_portfolios(
-        targets: Targets, dry_run: StrictBool = True, confirm: StrictBool = False,
+        targets: Targets,
+        dry_run: StrictBool = True,
+        confirm: StrictBool = False,
     ) -> CallToolResult:
         return await run(targets=targets, action="stop", dry_run=dry_run, confirm=confirm)
 
@@ -130,10 +152,13 @@ def register_portfolio_control_tools(
             "торговлю и запрашивает снятие заявок обеих ног; расписание отключается, формулы остаются. "
             "До 200 точных пар robot_id/portfolio. Пакет не атомарный; позиции не закрываются. "
             "Не заменяй этой операцией обычный Stop без явного согласия пользователя." + COMMON
-        ), annotations=WRITE,
+        ),
+        annotations=WRITE,
     )
     async def hard_stop_portfolios(
-        targets: Targets, dry_run: StrictBool = True, confirm: StrictBool = False,
+        targets: Targets,
+        dry_run: StrictBool = True,
+        confirm: StrictBool = False,
     ) -> CallToolResult:
         return await run(targets=targets, action="hard_stop", dry_run=dry_run, confirm=confirm)
 
@@ -145,9 +170,12 @@ def register_portfolio_control_tools(
             "формул обратно требует ручной настройки. До 200 точных пар robot_id/portfolio. "
             "Пакет не атомарный; позиции не закрываются. Требует явного выбора именно Stop formulas, "
             "не используй как автоматическое усиление другой остановки." + COMMON
-        ), annotations=WRITE,
+        ),
+        annotations=WRITE,
     )
     async def stop_portfolio_formulas(
-        targets: Targets, dry_run: StrictBool = True, confirm: StrictBool = False,
+        targets: Targets,
+        dry_run: StrictBool = True,
+        confirm: StrictBool = False,
     ) -> CallToolResult:
         return await run(targets=targets, action="stop_formulas", dry_run=dry_run, confirm=confirm)
