@@ -1,0 +1,48 @@
+name: Portfolio controls feature integration
+on:
+  push:
+    branches: [agent/portfolio-controls]
+permissions:
+  contents: write
+concurrency:
+  group: portfolio-controls-feature-integration
+  cancel-in-progress: false
+jobs:
+  integrate-and-test:
+    if: github.ref == 'refs/heads/agent/portfolio-controls'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4
+        with:
+          python-version: '3.12'
+          enable-cache: false
+      - name: Apply reviewed integration
+        run: python scripts/integrate_portfolio_controls.py
+      - name: Install locked dependencies
+        run: uv sync --locked
+      - name: Format only new modules and sort touched imports
+        run: |
+          uv run ruff check --select I --fix app/portfolio_control.py app/portfolio_tools.py app/main.py app/oauth.py tests/test_portfolio_controls.py tests/test_portfolio_control_oauth.py
+          uv run ruff format app/portfolio_control.py app/portfolio_tools.py tests/test_portfolio_controls.py tests/test_portfolio_control_oauth.py
+      - name: Lint application and tests
+        run: uv run ruff check app tests
+      - name: Run all regression tests without live credentials
+        run: uv run pytest -q
+      - name: Commit reviewed changes to feature branch only
+        run: |
+          test "$GITHUB_REF" = "refs/heads/agent/portfolio-controls"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app tests README.md AGENTS.md .env.example
+          if ! git diff --cached --quiet; then
+            git commit -m 'Integrate scoped portfolio controls and update permanent project context'
+            git push origin HEAD:refs/heads/agent/portfolio-controls
+          fi
+          git show --stat --oneline HEAD
+      - name: Report remaining read-only documentation references
+        if: always()
+        run: grep -nE 'read-only|только чита|не меняет|не изменя' README.md AGENTS.md app/onboarding.py || true
