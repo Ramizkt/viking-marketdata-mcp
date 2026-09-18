@@ -391,3 +391,95 @@ async def test_oversized_batch_rejected_before_any_write(client):
     with pytest.raises(ValueError):
         await PortfolioControlService(client).run(targets=targets, action="stop", dry_run=False, confirm=True)
     client._request_connected.assert_not_awaited()
+
+
+
+async def test_directional_stop_schemas():
+    async with create_connected_server_and_client_session(main.mcp, raise_exceptions=True) as session:
+        tools = {t.name: t for t in (await session.list_tools()).tools}
+    for name in ("stop_portfolio_trading", "stop_portfolios"):
+        schema = tools[name].inputSchema["properties"]["side"]
+        assert set(schema["enum"]) == {"both", "sell", "buy"}
+        assert schema["default"] == "both"
+        assert "side" not in tools[name].inputSchema["required"]
+        assert "не изменяется этой командой" in tools[name].description
+    for name in ("hard_stop_portfolios", "stop_portfolio_formulas"):
+        assert "side" not in tools[name].inputSchema["properties"]
+
+
+@pytest.mark.parametrize("tool_name", ["stop_portfolio_trading", "stop_portfolios"])
+@pytest.mark.parametrize("dry_run", [True, False])
+@pytest.mark.parametrize(
+    "side, flags",
+    [
+        (None, {"re_sell": False, "re_buy": False}),
+        ("both", {"re_sell": False, "re_buy": False}),
+        ("sell", {"re_sell": False}),
+        ("buy", {"re_buy": False}),
+    ],
+)
+async def test_directional_stop_mcp_wire_payload(client, monkeypatch, tool_name, dry_run, side, flags):
+    monkeypatch.setattr(main.settings, "viking_portfolio_writes_enabled", not dry_run)
+    monkeypatch.setattr(
+        portfolio_tools,
+        "get_access_token",
+        lambda: SimpleNamespace(scopes=[OAUTH_SCOPE, PORTFOLIO_WRITE_SCOPE]),
+    )
+    monkeypatch.setattr(main, "_service_for_request", lambda: SimpleNamespace(client=client))
+    targets = [TARGET]
+    if tool_name == "stop_portfolios":
+        targets.append({"robot_id": "test-robot", "portfolio": "test-second"})
+        args = {"targets": targets}
+    else:
+        args = dict(TARGET)
+    args.update(dry_run=dry_run, confirm=not dry_run)
+    if side is not None:
+        args["side"] = side
+    client._request_connected.side_effect = [
+        acknowledgement(portfolio=t["portfolio"]) for t in targets
+    ]
+    async with create_connected_server_and_client_session(main.mcp, raise_exceptions=True) as session:
+        result = await session.call_tool(tool_name, args)
+    assert result.isError is False
+    items = result.structuredContent["items"]
+    assert len(items) == len(targets)
+    for index, target in enumerate(targets):
+        expected = {
+            "type": "portfolio.update",
+            "data": {"r_id": target["robot_id"], "portfolio": {"name": target["portfolio"], **flags}},
+        }
+        if dry_run:
+            assert items[index]["status"] == "preview"
+            assert items[index]["request"] == expected
+        else:
+            assert items[index]["status"] == "accepted"
+            sent = client._request_connected.await_args_list[index]
+            assert sent.args == (expected["type"], expected["data"])
+        assert items[index]["verified"] is False
+    if dry_run:
+        client._ensure_connected.assert_not_awaited()
+        client._request_connected.assert_not_awaited()
+    else:
+        assert client._request_connected.await_count == len(targets)
+    client.request.assert_not_called()
+    client.get_portfolio_template.assert_not_awaited()
+
+
+@pytest.mark.parametrize("tool_name", ["stop_portfolio_trading", "stop_portfolios"])
+@pytest.mark.parametrize("wrong", ["", "SELL", "re_sell", True, None])
+async def test_invalid_stop_side_rejected_before_service(client, monkeypatch, tool_name, wrong):
+    monkeypatch.setattr(main.settings, "viking_portfolio_writes_enabled", True)
+    monkeypatch.setattr(
+        portfolio_tools,
+        "get_access_token",
+        lambda: SimpleNamespace(scopes=[OAUTH_SCOPE, PORTFOLIO_WRITE_SCOPE]),
+    )
+    factory = Mock(return_value=SimpleNamespace(client=client))
+    monkeypatch.setattr(main, "_service_for_request", factory)
+    args = {"targets": [TARGET]} if tool_name == "stop_portfolios" else dict(TARGET)
+    args.update(side=wrong, dry_run=False, confirm=True)
+    async with create_connected_server_and_client_session(main.mcp, raise_exceptions=True) as session:
+        result = await session.call_tool(tool_name, args)
+    assert result.isError is True
+    factory.assert_not_called()
+    client._request_connected.assert_not_awaited()

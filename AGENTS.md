@@ -819,7 +819,8 @@ MCP-инструментов для snapshot/update lifecycle, пагинаци�
   UTF-8 max_len. Не сливать patch со snapshot, не передавать securities.
 - `stop_portfolio_trading`: `portfolio.update` только re_sell/re_buy=false,
   side=both/sell/buy. Нельзя передавать true или другие поля.
-- `stop_portfolios`: те же два false по каждой явно указанной цели.
+- `stop_portfolios`: `side=both/sell/buy` по каждой явно указанной цели;
+  по умолчанию both, как обычная команда Stop portfolios.
 - `hard_stop_portfolios`: `portfolio.hard_stop`, data={r_id,p_id}.
   В API-примере встречается опечатка `portfolio.hasrd_stop`: не использовать её.
 - `stop_portfolio_formulas`: `portfolio.formulas_stop`, data={r_id,p_id}.
@@ -858,3 +859,19 @@ r_id/p_id. verified=false до отдельной проверки. Состоя
 обязательны для этой поставки. Live-проверки остановок разрешены только на явно
 выбранных пользователем тестовых портфелях. Этот PR сам по себе не разрешает merge,
 production deploy или реальные операции с портфелями.
+
+
+### Остановка выбранного направления (уточнение PR #29)
+
+`stop_portfolio_trading` и `stop_portfolios` поддерживают `side`:
+`sell` отправляет только re_sell=false, `buy` — только re_buy=false,
+`both` (по умолчанию) — оба флага false. Для списка side одинаков для всех targets.
+Не отправлять противоположный флаг вообще: не устанавливать его в true/false
+и не копировать из снапшота. Запрос «останови только покупки/продажи» не разрешает
+остановку обоих направлений; в предпросмотре явно показывать выбранное направление.
+Hard stop/Stop formulas остаются отдельными полными остановками без side.
+Общий robot.subscribe.value.re[].re — OR двух флагов; он не доказывает состояние
+конкретного направления. Сохранившийся true не означает отказ односторонней
+остановки и не разрешает расширить её на другой флаг или автоматически повторить.
+Тесты проверяют enum/default side, payload через полный MCP-путь для одного
+портфеля и списка, dry_run без записи, отклонение неверного side до сервиса.

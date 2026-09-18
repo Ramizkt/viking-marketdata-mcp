@@ -107,7 +107,9 @@ def register_portfolio_control_tools(
     @mcp.tool(
         title="Выключить re_sell/re_buy портфеля",
         description=(
-            "Устанавливает только re_sell=false и/или re_buy=false: side=both, sell или buy. "
+            "side=sell устанавливает только re_sell=false; side=buy — только re_buy=false; "
+            "side=both (по умолчанию) — оба флага false. Второй флаг при выборе sell/buy "
+            "не передаётся в запросе и не изменяется этой командой. "
             "Никогда не включает торговлю. Расписание и формулы не отключаются и могут снова "
             "изменить флаги. Не эквивалентно Hard stop или Stop formulas." + COMMON
         ),
@@ -131,7 +133,10 @@ def register_portfolio_control_tools(
     @mcp.tool(
         title="Stop portfolios",
         description=(
-            "Для явно перечисленных портфелей устанавливает re_sell=false и re_buy=false. "
+            "Для явно перечисленных портфелей выбирает направление остановки: side=sell — "
+            "только re_sell=false; side=buy — только re_buy=false; side=both (по умолчанию) — "
+            "оба флага false. Выбор применяется ко всем targets. Невыбранный флаг не "
+            "передаётся в запросе и не изменяется этой командой. Никогда не включает торговлю. "
             "Заявки второй ноги продолжают работать. Расписание и формулы не отключаются. "
             "До 200 точных пар robot_id/portfolio, без wildcard и дубликатов. Пакет не атомарный; "
             "для каждого портфеля возвращается отдельный результат. Позиции не закрываются." + COMMON
@@ -140,10 +145,11 @@ def register_portfolio_control_tools(
     )
     async def stop_portfolios(
         targets: Targets,
+        side: Side = "both",
         dry_run: StrictBool = True,
         confirm: StrictBool = False,
     ) -> CallToolResult:
-        return await run(targets=targets, action="stop", dry_run=dry_run, confirm=confirm)
+        return await run(targets=targets, action="stop", side=side, dry_run=dry_run, confirm=confirm)
 
     @mcp.tool(
         title="Hard stop portfolios",
