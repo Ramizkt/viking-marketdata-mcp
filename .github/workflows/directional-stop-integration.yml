@@ -1,0 +1,273 @@
+name: Directional stop integration
+on:
+  push:
+    branches: [agent/portfolio-controls]
+    paths: [.github/workflows/directional-stop-integration.yml]
+permissions:
+  contents: write
+jobs:
+  directional-stop:
+    if: github.repository == 'Ramizkt/viking-marketdata-mcp' && github.ref == 'refs/heads/agent/portfolio-controls'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4
+        with:
+          version: '0.12.17'
+          python-version: '3.12'
+          enable-cache: false
+      - name: Apply exact reviewed changes
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD^)" = c0da0d7f5160dfbfe5056c533bb7fe52f8912b70
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          expected = {
+              'app/portfolio_tools.py': '1c3a0fda18929e445b7190893a9e4aca4983440f',
+              'tests/test_portfolio_controls.py': '178995c674104c08245c56e61fd1dc350477efd5',
+              'AGENTS.md': '4d9dc161322dda541cc04d10ffaa3c8a8a88e739',
+              'README.md': 'a4a17d4819633d28a248f268f11074fb374ecd79',
+          }
+          for path, sha in expected.items():
+              actual = subprocess.check_output(['git', 'hash-object', path], text=True).strip()
+              assert actual == sha, f'Unexpected concurrent changes in {path}'
+
+          def replace_once(text, old, new):
+              assert text.count(old) == 1, f'Expected one exact match: {old!r}'
+              return text.replace(old, new, 1)
+
+          p = Path('app/portfolio_tools.py')
+          text = p.read_text()
+          text = replace_once(
+              text,
+              '            "Устанавливает только re_sell=false и/или re_buy=false: side=both, sell или buy. "\n',
+              '            "side=sell устанавливает только re_sell=false; side=buy — только re_buy=false; "\n'
+              '            "side=both (по умолчанию) — оба флага false. Второй флаг при выборе sell/buy "\n'
+              '            "не передаётся в запросе и не изменяется этой командой. "\n',
+          )
+          text = replace_once(
+              text,
+              '            "Для явно перечисленных портфелей устанавливает re_sell=false и re_buy=false. "\n',
+              '            "Для явно перечисленных портфелей выбирает направление остановки: side=sell — "\n'
+              '            "только re_sell=false; side=buy — только re_buy=false; side=both (по умолчанию) — "\n'
+              '            "оба флага false. Выбор применяется ко всем targets. Невыбранный флаг не "\n'
+              '            "передаётся в запросе и не изменяется этой командой. Никогда не включает торговлю. "\n',
+          )
+          text = replace_once(
+              text,
+              '    async def stop_portfolios(\n        targets: Targets,\n',
+              '    async def stop_portfolios(\n        targets: Targets,\n        side: Side = "both",\n',
+          )
+          text = replace_once(
+              text,
+              '        return await run(targets=targets, action="stop", dry_run=dry_run, confirm=confirm)\n',
+              '        return await run(targets=targets, action="stop", side=side, dry_run=dry_run, confirm=confirm)\n',
+          )
+          p.write_text(text)
+
+          p = Path('README.md')
+          text = p.read_text()
+          text = replace_once(
+              text,
+              '| `stop_portfolios` | `portfolio.update` для каждой цели | Оба re-флага false; расписание и формулы сохраняются; заявки второй ноги могут продолжать работу |',
+              '| `stop_portfolios` | `portfolio.update` для каждой цели | `side=both/sell/buy` для всех targets; меняет только выбранные re-флаги на false; расписание и формулы сохраняются |',
+          )
+          marker = 'Массовые инструменты принимают `targets` — от 1 до 200 точных пар:'
+          text = replace_once(text, marker, '''Обычный **Stop portfolios** без указания направления сохраняет прежнее поведение:
+          `side="both"` выключает оба направления. Остановка только выбранного направления
+          доступна и для одного портфеля (`stop_portfolio_trading`), и для списка
+          (`stop_portfolios`):
+
+          | side | Отправляемые поля | Что команда не меняет |
+          | --- | --- | --- |
+          | `sell` | `re_sell=false` | `re_buy` |
+          | `buy` | `re_buy=false` | `re_sell` |
+          | `both` (по умолчанию) | `re_sell=false`, `re_buy=false` | Остальные поля |
+
+          Невыбранный флаг вообще не отправляется, а не записывается повторно из снапшота.
+          Команда не включает другое направление, даже если оно было выключено.
+          `side` у `stop_portfolios` применяется одинаково ко всем элементам `targets`.
+          Для разных направлений у разных портфелей выполняйте отдельные явно согласованные
+          вызовы. Hard stop и Stop formulas не получают параметр `side`.
+
+          Пример предпросмотра остановки **только продаж** одного портфеля:
+
+          ```json
+          {
+            "robot_id": "test-robot",
+            "portfolio": "example-a",
+            "side": "sell",
+            "dry_run": true
+          }
+          ```
+
+          Для списка используйте тот же `side` в `stop_portfolios`, например остановку
+          **только покупок**:
+
+          ```json
+          {
+            "targets": [
+              {"robot_id": "test-robot", "portfolio": "example-a"},
+              {"robot_id": "test-robot", "portfolio": "example-b"}
+            ],
+            "side": "buy",
+            "dry_run": true
+          }
+          ```
+
+          Если после односторонней остановки другое направление остаётся включённым,
+          общий `robot.subscribe.value.re[].re` может оставаться `true`: это логическое
+          «re_sell или re_buy», а не отдельный статус выбранного направления.
+          Это не основание выключать второе направление или повторять команду.
+
+          ''' + marker)
+          p.write_text(text)
+
+          p = Path('AGENTS.md')
+          text = p.read_text()
+          text = replace_once(
+              text,
+              '- `stop_portfolios`: те же два false по каждой явно указанной цели.',
+              '- `stop_portfolios`: `side=both/sell/buy` по каждой явно указанной цели;\n'
+              '  по умолчанию both, как обычная команда Stop portfolios.',
+          )
+          text += '''
+
+          ### Остановка выбранного направления (уточнение PR #29)
+
+          `stop_portfolio_trading` и `stop_portfolios` поддерживают `side`:
+          `sell` отправляет только re_sell=false, `buy` — только re_buy=false,
+          `both` (по умолчанию) — оба флага false. Для списка side одинаков для всех targets.
+          Не отправлять противоположный флаг вообще: не устанавливать его в true/false
+          и не копировать из снапшота. Запрос «останови только покупки/продажи» не разрешает
+          остановку обоих направлений; в предпросмотре явно показывать выбранное направление.
+          Hard stop/Stop formulas остаются отдельными полными остановками без side.
+          Общий robot.subscribe.value.re[].re — OR двух флагов; он не доказывает состояние
+          конкретного направления. Сохранившийся true не означает отказ односторонней
+          остановки и не разрешает расширить её на другой флаг или автоматически повторить.
+          Тесты проверяют enum/default side, payload через полный MCP-путь для одного
+          портфеля и списка, dry_run без записи, отклонение неверного side до сервиса.
+          '''
+          p.write_text(text)
+
+          p = Path('tests/test_portfolio_controls.py')
+          text = p.read_text()
+          text += '''
+
+
+          async def test_directional_stop_schemas():
+              async with create_connected_server_and_client_session(main.mcp, raise_exceptions=True) as session:
+                  tools = {t.name: t for t in (await session.list_tools()).tools}
+              for name in ("stop_portfolio_trading", "stop_portfolios"):
+                  schema = tools[name].inputSchema["properties"]["side"]
+                  assert set(schema["enum"]) == {"both", "sell", "buy"}
+                  assert schema["default"] == "both"
+                  assert "side" not in tools[name].inputSchema["required"]
+                  assert "не изменяется этой командой" in tools[name].description
+              for name in ("hard_stop_portfolios", "stop_portfolio_formulas"):
+                  assert "side" not in tools[name].inputSchema["properties"]
+
+
+          @pytest.mark.parametrize("tool_name", ["stop_portfolio_trading", "stop_portfolios"])
+          @pytest.mark.parametrize("dry_run", [True, False])
+          @pytest.mark.parametrize(
+              "side, flags",
+              [
+                  (None, {"re_sell": False, "re_buy": False}),
+                  ("both", {"re_sell": False, "re_buy": False}),
+                  ("sell", {"re_sell": False}),
+                  ("buy", {"re_buy": False}),
+              ],
+          )
+          async def test_directional_stop_mcp_wire_payload(client, monkeypatch, tool_name, dry_run, side, flags):
+              monkeypatch.setattr(main.settings, "viking_portfolio_writes_enabled", not dry_run)
+              monkeypatch.setattr(
+                  portfolio_tools,
+                  "get_access_token",
+                  lambda: SimpleNamespace(scopes=[OAUTH_SCOPE, PORTFOLIO_WRITE_SCOPE]),
+              )
+              monkeypatch.setattr(main, "_service_for_request", lambda: SimpleNamespace(client=client))
+              targets = [TARGET]
+              if tool_name == "stop_portfolios":
+                  targets.append({"robot_id": "test-robot", "portfolio": "test-second"})
+                  args = {"targets": targets}
+              else:
+                  args = dict(TARGET)
+              args.update(dry_run=dry_run, confirm=not dry_run)
+              if side is not None:
+                  args["side"] = side
+              client._request_connected.side_effect = [
+                  acknowledgement(portfolio=t["portfolio"]) for t in targets
+              ]
+              async with create_connected_server_and_client_session(main.mcp, raise_exceptions=True) as session:
+                  result = await session.call_tool(tool_name, args)
+              assert result.isError is False
+              items = result.structuredContent["items"]
+              assert len(items) == len(targets)
+              for index, target in enumerate(targets):
+                  expected = {
+                      "type": "portfolio.update",
+                      "data": {"r_id": target["robot_id"], "portfolio": {"name": target["portfolio"], **flags}},
+                  }
+                  if dry_run:
+                      assert items[index]["status"] == "preview"
+                      assert items[index]["request"] == expected
+                  else:
+                      assert items[index]["status"] == "accepted"
+                      sent = client._request_connected.await_args_list[index]
+                      assert sent.args == (expected["type"], expected["data"])
+                  assert items[index]["verified"] is False
+              if dry_run:
+                  client._ensure_connected.assert_not_awaited()
+                  client._request_connected.assert_not_awaited()
+              else:
+                  assert client._request_connected.await_count == len(targets)
+              client.request.assert_not_called()
+              client.get_portfolio_template.assert_not_awaited()
+
+
+          @pytest.mark.parametrize("tool_name", ["stop_portfolio_trading", "stop_portfolios"])
+          @pytest.mark.parametrize("wrong", ["", "SELL", "re_sell", True, None])
+          async def test_invalid_stop_side_rejected_before_service(client, monkeypatch, tool_name, wrong):
+              monkeypatch.setattr(main.settings, "viking_portfolio_writes_enabled", True)
+              monkeypatch.setattr(
+                  portfolio_tools,
+                  "get_access_token",
+                  lambda: SimpleNamespace(scopes=[OAUTH_SCOPE, PORTFOLIO_WRITE_SCOPE]),
+              )
+              factory = Mock(return_value=SimpleNamespace(client=client))
+              monkeypatch.setattr(main, "_service_for_request", factory)
+              args = {"targets": [TARGET]} if tool_name == "stop_portfolios" else dict(TARGET)
+              args.update(side=wrong, dry_run=False, confirm=True)
+              async with create_connected_server_and_client_session(main.mcp, raise_exceptions=True) as session:
+                  result = await session.call_tool(tool_name, args)
+              assert result.isError is True
+              factory.assert_not_called()
+              client._request_connected.assert_not_awaited()
+          '''
+          p.write_text(text)
+          print('Directional stop changes applied to four files. No live Viking requests.')
+          PY
+      - name: Locked dependency installation
+        run: uv sync --locked
+      - name: Lint
+        run: uv run ruff check .
+      - name: Full regression suite (mocked Viking only)
+        run: uv run pytest -q
+      - name: Commit to the feature branch and remove this temporary workflow
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = refs/heads/agent/portfolio-controls
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/directional-stop-integration.yml
+          git add app/portfolio_tools.py tests/test_portfolio_controls.py README.md AGENTS.md
+          git diff --cached --check
+          git commit -m 'Support sell-only and buy-only stops for explicit portfolio batches'
+          git push origin HEAD:refs/heads/agent/portfolio-controls
+          git show --stat --oneline HEAD
