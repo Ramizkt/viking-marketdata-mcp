@@ -11,9 +11,11 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, ResourceLink, TextContent, ToolAnnotations
 from pydantic import AnyHttpUrl, AnyUrl, Field
 from starlette.applications import Starlette
+from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
+from starlette.types import Receive, Scope, Send
 
 from app.config import get_settings
 from app.export_store import ExportStore
@@ -1662,7 +1664,30 @@ _starlette_app = Starlette(
     ],
     lifespan=lifespan,
 )
-app = _starlette_app
+# Preflight has no bearer token; handle it before MCP's OAuth middleware.
+# Wrapping outside Starlette also keeps CORS headers on MCP error responses.
+_mcp_cors_app = CORSMiddleware(
+    _starlette_app,
+    allow_origins=settings.cors_allowed_origins,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "MCP-Protocol-Version",
+        "Mcp-Session-Id",
+        "Last-Event-ID",
+    ],
+    expose_headers=["Mcp-Session-Id"],
+    allow_credentials=False,
+)
+
+
+async def app(scope: Scope, receive: Receive, send: Send) -> None:
+    # Keep the SDK's existing OAuth/metadata CORS policy and the app lifespan intact.
+    if scope["type"] == "http" and scope["path"] in {"/mcp", "/mcp/"}:
+        await _mcp_cors_app(scope, receive, send)
+    else:
+        await _starlette_app(scope, receive, send)
 
 
 def run() -> None:

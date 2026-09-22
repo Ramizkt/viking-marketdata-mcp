@@ -494,6 +494,26 @@ EXPORT_SIGNING_KEY=случайный внутренний секрет
 
 ## Безопасность
 
+### Прямое подключение из браузера
+
+Для `/mcp` CORS по умолчанию разрешает запросы только с `https://k1forge.com`.
+`CORS_ALLOWED_ORIGINS` задаёт полный список разрешённых origin в виде JSON-массива,
+например `["https://k1forge.com","https://preview.example.com"]`. Указывайте точный
+origin со схемой и при необходимости портом, без пути и завершающего `/`.
+Wildcard запрещён; `[]` отключает cross-origin доступ. После изменения переменной
+нужен перезапуск сервиса. Не добавляйте недоверенные preview-домены.
+
+Предварительный `OPTIONS` обрабатывается до OAuth, но сами MCP-запросы по-прежнему
+требуют bearer access token и прежние scopes. Cookie credentials не используются;
+браузерный клиент должен отправлять `credentials: "omit"`. Разрешены методы
+`GET`, `POST`, `DELETE`, `OPTIONS` и заголовки `Authorization`, `Content-Type`,
+`MCP-Protocol-Version`, `Mcp-Session-Id`, `Last-Event-ID`; `Mcp-Session-Id` доступен
+клиентскому JavaScript. Текущий сервер stateless, поэтому session ID не обязателен.
+CORS не заменяет OAuth и не меняет права чтения или управления портфелями.
+Прежняя CORS-политика OAuth и metadata endpoints SDK остаётся неизменной.
+
+### Авторизация и хранение
+
 - OAuth 2.1 с PKCE и динамической регистрацией клиента;
 - session access token имеет тот же 15-минутный idle TTL, который сервер реально
   применяет; сессия продлевается ротируемым одноразовым refresh token только в RAM;
