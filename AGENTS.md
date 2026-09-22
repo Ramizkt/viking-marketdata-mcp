@@ -687,6 +687,19 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 ## 11. Deploy и эксплуатация
 
+Для прямых запросов браузерного MCP-клиента внешняя `CORSMiddleware` обрабатывает
+пути `/mcp` и `/mcp/`, включая preflight до OAuth и заголовки ошибок. Остальные
+routes и lifespan проходят без изменения; прежняя CORS-политика OAuth и metadata
+endpoints SDK сохраняется. Настройка
+`CORS_ALLOWED_ORIGINS` — JSON-массив точных HTTP(S) origin; по умолчанию только
+`https://k1forge.com`, `[]` отключает cross-origin доступ. Wildcard, credentials в
+URL и пути запрещены. Для дополнительного доверенного frontend задавайте полный
+список и перезапускайте сервис. Cookies не разрешены (`allow_credentials=False`),
+браузер использует bearer token и `credentials: "omit"`. Actual MCP requests
+сохраняют прежние OAuth/scopes; CORS не расширяет торговые права. Разрешены методы
+GET/POST/DELETE/OPTIONS и служебные MCP-заголовки; `Mcp-Session-Id` expose для JS.
+Регрессии CORS, сохранения OAuth и lifecycle проверяются в `tests/test_cors.py`.
+
 Production развёрнут в Railway из Dockerfile:
 
 - Uvicorn слушает `${PORT}`;

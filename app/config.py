@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,6 +34,7 @@ class Settings(BaseSettings):
     public_base_url: str = ""
     railway_public_domain: str = ""
     port: int = Field(default=8000, ge=1, le=65535)
+    cors_allowed_origins: list[str] = Field(default_factory=lambda: ["https://k1forge.com"])
 
     inline_max_rows: int = Field(default=500, ge=1, le=100_000)
     inline_max_bytes: int = Field(default=200_000, ge=1_000, le=4_000_000)
@@ -40,6 +42,27 @@ class Settings(BaseSettings):
     export_ttl_seconds: int = Field(default=86_400, ge=300, le=2_592_000)
     export_dir: Path = Path("./data/exports")
     export_signing_key: str = ""
+
+    @field_validator("cors_allowed_origins")
+    @classmethod
+    def validate_cors_origins(cls, origins: list[str]) -> list[str]:
+        for origin in origins:
+            parsed = urlsplit(origin)
+            if (
+                "*" in origin
+                or any(char.isspace() for char in origin)
+                or parsed.scheme not in {"http", "https"}
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.path
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError("CORS origins must be explicit HTTP(S) origins without paths or wildcards")
+            # Accessing port also rejects malformed or out-of-range ports.
+            _ = parsed.port
+        return list(dict.fromkeys(origins))
 
     @property
     def resolved_public_base_url(self) -> str:
