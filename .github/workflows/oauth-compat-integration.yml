@@ -39,7 +39,20 @@ jobs:
           s = p.read_text()
           s = s.replace('claims={"iss": self.base_url, "credential_mode": "local", "grant_generation": payload.get("grant_generation", 0)},', 'claims={\n                    "iss": self.base_url, "credential_mode": "local",\n                    "grant_generation": payload.get("grant_generation", 0),\n                },')
           s = s.replace('сохранит зашифрованный токен. У облачного клиента', 'сохранит зашифрованный токен.\n      У облачного клиента')
+          old = '        requested_scopes = set(params.scopes or [OAUTH_SCOPE])\n'
+          assert s.count(old) == 1
+          s = s.replace(old, '        if params.scopes is None:\n            # Omitted scopes use this registration, not the new global defaults.\n            # Explicit old read registrations therefore remain read-only.\n            params = params.model_copy(update={"scopes": (client.scope or OAUTH_SCOPE).split()})\n' + old, 1)
           p.write_text(s)
+          p = Path('tests/test_oauth_compatibility.py')
+          s = p.read_text().replace('async def fixture_read() -> dict:', 'async def fixture_read() -> dict[str, str]:')
+          p.write_text(s)
+          p = Path('tests/test_portfolio_controls.py')
+          s = p.read_text()
+          assert s.count('assert len(tools) == 55') == 1
+          p.write_text(s.replace('assert len(tools) == 55', 'assert len(tools) == 56'))
+          for path in ('README.md', 'AGENTS.md'):
+              p = Path(path)
+              p.write_text(p.read_text() + '\nПри отсутствующем scope на /authorize используется набор регистрации клиента,\nне глобальный default: старый read-only client_id остаётся read-only.\n')
           PY
           rm scripts/_apply_oauth_compat.py .github/workflows/oauth-compat-integration.yml
       - name: Locked dependencies
@@ -58,7 +71,7 @@ jobs:
           test "$GITHUB_REF" = refs/heads/agent/oauth-client-compatibility
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add app/main.py app/oauth.py app/portfolio_tools.py app/auth_compat.py app/grant_versions.py tests/test_mcp.py tests/test_oauth_compatibility.py README.md AGENTS.md scripts/_apply_oauth_compat.py .github/workflows/oauth-compat-integration.yml
+          git add app/main.py app/oauth.py app/portfolio_tools.py app/auth_compat.py app/grant_versions.py tests/test_mcp.py tests/test_oauth_compatibility.py tests/test_portfolio_controls.py README.md AGENTS.md scripts/_apply_oauth_compat.py .github/workflows/oauth-compat-integration.yml
           git diff --cached --check
           git commit -m 'Integrate optional OAuth grants, client discovery and safe step-up; preserve legacy clients'
           git push origin HEAD:refs/heads/agent/oauth-client-compatibility
