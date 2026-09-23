@@ -3,12 +3,15 @@ name: Python regression tests
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: python-tests-${{ github.event.pull_request.number }}
+  group: python-tests-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -32,6 +35,83 @@ jobs:
       - name: Install locked dependencies
         run: uv sync --locked
       - name: Lint
-        run: uv run ruff check .
+        run: uv run --locked ruff check .
       - name: Regression tests (mocked Viking transport only)
-        run: uv run pytest -q
+        run: uv run --locked pytest -q
+      - name: Lockfile was not changed
+        run: git diff --exit-code -- pyproject.toml uv.lock
+
+  container:
+    name: Locked production container
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4
+        with:
+          version: '0.12.17'
+          python-version: '3.12'
+          enable-cache: false
+      - name: Prepare locked inventory references
+        run: |
+          uv sync --locked
+          uv export --locked --no-dev --no-emit-project --no-hashes --output-file /tmp/runtime-requirements.txt
+          uv export --locked --no-emit-project --no-hashes --output-file /tmp/test-requirements.txt
+      - name: Build production Dockerfile
+        run: docker build --pull --progress=plain --tag viking-mcp-runtime:ci .
+      - name: Verify exact production inventory
+        run: |
+          docker run --rm --network none -i --entrypoint python viking-mcp-runtime:ci - capture \
+            < scripts/check_runtime_lock.py > /tmp/runtime-inventory.json
+          uv run --locked python scripts/check_runtime_lock.py verify \
+            --inventory /tmp/runtime-inventory.json --requirements /tmp/runtime-requirements.txt
+      - name: Build test-only image on top of production
+        run: docker build --progress=plain --file Dockerfile.ci --tag viking-mcp-tests:ci .
+      - name: Verify adding test tools did not change runtime pins
+        run: |
+          docker run --rm --network none --entrypoint python viking-mcp-tests:ci \
+            scripts/check_runtime_lock.py capture > /tmp/test-inventory.json
+          uv run --locked python scripts/check_runtime_lock.py verify \
+            --inventory /tmp/test-inventory.json --requirements /tmp/test-requirements.txt
+      - name: Full regressions against installed wheel (no external network)
+        run: docker run --rm --network none viking-mcp-tests:ci
+      - name: Real production CMD and OAuth HTTP smoke (no external network)
+        run: |
+          docker run -d --name viking-locked-smoke --network none --tmpfs /data \
+            -e PORT=8765 -e PUBLIC_BASE_URL=http://127.0.0.1:8765 \
+            -e EXPORT_SIGNING_KEY=container-smoke-only-not-a-real-secret \
+            -e VIKING_PORTFOLIO_WRITES_ENABLED=true \
+            -e VIKING_WS_URL=ws://127.0.0.1:9/unreachable viking-mcp-runtime:ci
+          docker exec -i viking-locked-smoke python - < scripts/smoke_runtime_http.py
+      - name: Stale lock must fail the actual Docker build
+        shell: bash
+        run: |
+          set -euo pipefail
+          context=$(mktemp -d)
+          log=$(mktemp)
+          trap 'rm -rf "$context"; rm -f "$log"' EXIT
+          cp Dockerfile pyproject.toml uv.lock README.md "$context/"
+          cp -r app "$context/app"
+          python - "$context/pyproject.toml" <<'PY'
+          import sys
+          from pathlib import Path
+          path = Path(sys.argv[1])
+          text = path.read_text()
+          old = 'version = "0.1.0"'
+          assert text.count(old) == 1
+          path.write_text(text.replace(old, 'version = "0.1.1+stale.lock.test"'))
+          PY
+          if docker build --target builder --progress=plain "$context" >"$log" 2>&1; then
+            cat "$log"
+            echo 'ERROR: stale lock was accepted'
+            exit 1
+          fi
+          grep -Ei 'lockfile.*needs to be updated|lockfile.*not up.to.date' "$log"
+          git diff --exit-code -- pyproject.toml uv.lock
+      - name: Container logs and cleanup
+        if: always()
+        run: |
+          docker logs viking-locked-smoke 2>&1 || true
+          docker rm -f viking-locked-smoke 2>/dev/null || true
