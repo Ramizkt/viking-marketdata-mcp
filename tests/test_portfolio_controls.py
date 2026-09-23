@@ -272,7 +272,7 @@ async def test_batch_reports_rejection_and_unknown_and_remaining(client):
 async def test_write_tool_annotations_and_read_tools_unchanged():
     async with create_connected_server_and_client_session(main.mcp, raise_exceptions=True) as session:
         tools = {t.name: t for t in (await session.list_tools()).tools}
-    assert len(tools) == 55
+    assert len(tools) == 56
     for name, tool in tools.items():
         assert tool.annotations.readOnlyHint is (name not in WRITE_TOOL_NAMES)
         if name in WRITE_TOOL_NAMES:

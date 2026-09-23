@@ -20,8 +20,12 @@ from starlette.routing import Mount, Route
 from starlette.testclient import TestClient
 
 from app.auth_compat import (
-    CompatibleFastMCP, OAuthCompatibilityMiddleware, WRITE_TOOL_NAMES,
-    metadata_routes, offered_scopes, register_auth_status,
+    WRITE_TOOL_NAMES,
+    CompatibleFastMCP,
+    OAuthCompatibilityMiddleware,
+    metadata_routes,
+    offered_scopes,
+    register_auth_status,
 )
 from app.config import Settings
 from app.credentials import VikingCredentials
@@ -41,21 +45,30 @@ ARGS = {"robot_id": "fixture-robot", "portfolio": "fixture-portfolio", "side": "
 @pytest.fixture
 def runtime(tmp_path, monkeypatch):
     settings = Settings(
-        public_base_url=BASE, export_signing_key="fixture-only-key",
-        oauth_client_store_path=tmp_path / "oauth-clients.json", viking_portfolio_writes_enabled=True,
+        public_base_url=BASE,
+        export_signing_key="fixture-only-key",
+        oauth_client_store_path=tmp_path / "oauth-clients.json",
+        viking_portfolio_writes_enabled=True,
     )
     provider = VikingOAuthProvider(settings)
     authenticate = AsyncMock()
     monkeypatch.setattr(VikingClient, "authenticate", authenticate)
     mcp = CompatibleFastMCP(
-        "fixture-mcp", auth_server_provider=provider,
+        "fixture-mcp",
+        auth_server_provider=provider,
         auth=AuthSettings(
-            issuer_url=AnyHttpUrl(BASE), resource_server_url=AnyHttpUrl(RESOURCE),
+            issuer_url=AnyHttpUrl(BASE),
+            resource_server_url=AnyHttpUrl(RESOURCE),
             required_scopes=[OAUTH_SCOPE],
             client_registration_options=ClientRegistrationOptions(
-                enabled=True, valid_scopes=BOTH, default_scopes=offered_scopes(settings),
+                enabled=True,
+                valid_scopes=BOTH,
+                default_scopes=offered_scopes(settings),
             ),
-        ), stateless_http=True, json_response=True, streamable_http_path="/mcp",
+        ),
+        stateless_http=True,
+        json_response=True,
+        streamable_http_path="/mcp",
     )
     viking = SimpleNamespace(execute_portfolio_control=AsyncMock(return_value={"r": "p", "data": {}}))
     factory = Mock(return_value=SimpleNamespace(client=viking))
@@ -63,7 +76,7 @@ def runtime(tmp_path, monkeypatch):
     register_auth_status(mcp, settings)
 
     @mcp.tool()
-    async def fixture_read() -> dict:
+    async def fixture_read() -> dict[str, str]:
         return {"read": "unchanged"}
 
     sdk_app = mcp.streamable_http_app()
@@ -74,26 +87,39 @@ def runtime(tmp_path, monkeypatch):
             yield
         await provider.close()
 
-    root = Starlette(routes=[
-        *metadata_routes(settings),
-        Route("/oauth/connect/{pending_id:str}", provider.connect_page, methods=["GET", "POST"]),
-        Mount("/", app=sdk_app),
-    ], lifespan=lifespan)
+    root = Starlette(
+        routes=[
+            *metadata_routes(settings),
+            Route("/oauth/connect/{pending_id:str}", provider.connect_page, methods=["GET", "POST"]),
+            Mount("/", app=sdk_app),
+        ],
+        lifespan=lifespan,
+    )
     app = CORSMiddleware(
         OAuthCompatibilityMiddleware(root, settings=settings, provider=provider),
-        allow_origins=["https://k1forge.com"], allow_methods=["GET", "POST", "OPTIONS"],
+        allow_origins=["https://k1forge.com"],
+        allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "MCP-Protocol-Version"],
         expose_headers=["WWW-Authenticate"],
     )
     with TestClient(app, base_url=BASE) as http:
-        yield SimpleNamespace(http=http, settings=settings, provider=provider, factory=factory,
-                              viking=viking, authenticate=authenticate, mcp=mcp)
+        yield SimpleNamespace(
+            http=http,
+            settings=settings,
+            provider=provider,
+            factory=factory,
+            viking=viking,
+            authenticate=authenticate,
+            mcp=mcp,
+        )
 
 
 def register(rt, scope=None, confidential=False, callback=None):
     body = {
-        "client_name": "fixture-client", "redirect_uris": [callback or "http://127.0.0.1:9999/callback"],
-        "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
+        "client_name": "fixture-client",
+        "redirect_uris": [callback or "http://127.0.0.1:9999/callback"],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
         "token_endpoint_auth_method": "client_secret_post" if confidential else "none",
     }
     if scope is not None:
@@ -105,9 +131,12 @@ def register(rt, scope=None, confidential=False, callback=None):
 
 def start(rt, client, scope=None, resource=RESOURCE, verifier_challenge=CHALLENGE):
     params = {
-        "response_type": "code", "client_id": client["client_id"],
-        "redirect_uri": client["redirect_uris"][0], "state": "fixture-state",
-        "code_challenge": verifier_challenge, "code_challenge_method": "S256",
+        "response_type": "code",
+        "client_id": client["client_id"],
+        "redirect_uri": client["redirect_uris"][0],
+        "state": "fixture-state",
+        "code_challenge": verifier_challenge,
+        "code_challenge_method": "S256",
     }
     if scope is not None:
         params["scope"] = scope
@@ -122,15 +151,20 @@ def finish(rt, client, connect_url, form, verifier=VERIFIER):
     query = parse_qs(urlparse(response.headers["location"]).query)
     assert query["state"] == ["fixture-state"]
     data = {
-        "grant_type": "authorization_code", "client_id": client["client_id"], "code": query["code"][0],
-        "redirect_uri": client["redirect_uris"][0], "code_verifier": verifier,
+        "grant_type": "authorization_code",
+        "client_id": client["client_id"],
+        "code": query["code"][0],
+        "redirect_uri": client["redirect_uris"][0],
+        "code_verifier": verifier,
     }
     if client.get("client_secret"):
         data["client_secret"] = client["client_secret"]
     return rt.http.post("/token", data=data)
 
 
-def login(rt, client, *, access="read", mode="session", scope=None, legacy=False, resource=RESOURCE, email=None):
+def login(
+    rt, client, *, access="read", mode="session", scope=None, legacy=False, resource=RESOURCE, email=None
+):
     form = {**FORM, "mode": mode}
     if not legacy:
         form["access_mode"] = access
@@ -149,11 +183,17 @@ def rpc(rt, token, method, params=None):
     headers = {"Accept": "application/json, text/event-stream", "MCP-Protocol-Version": "2025-11-25"}
     if token:
         headers["Authorization"] = "Bearer " + token
-    return rt.http.post("/mcp", json={"jsonrpc": "2.0", "id": 7, "method": method, "params": params or {}}, headers=headers)
+    return rt.http.post(
+        "/mcp", json={"jsonrpc": "2.0", "id": 7, "method": method, "params": params or {}}, headers=headers
+    )
 
 
 def refresh(rt, client, token):
-    data = {"grant_type": "refresh_token", "client_id": client["client_id"], "refresh_token": token["refresh_token"]}
+    data = {
+        "grant_type": "refresh_token",
+        "client_id": client["client_id"],
+        "refresh_token": token["refresh_token"],
+    }
     if client.get("client_secret"):
         data["client_secret"] = client["client_secret"]
     return rt.http.post("/token", data=data)
@@ -197,9 +237,15 @@ def test_complete_oauth_and_runtime_permissions(runtime, access, mode):
     assert value["viking_role_permissions_verified"] is False
     assert token["access_token"] not in status.text and FORM["api_key"] not in status.text
     assert FORM["email"] not in status.text
-    result = rpc(rt, token["access_token"], "tools/call", {
-        "name": "stop_portfolio_trading", "arguments": {**ARGS, "dry_run": False, "confirm": True},
-    })
+    result = rpc(
+        rt,
+        token["access_token"],
+        "tools/call",
+        {
+            "name": "stop_portfolio_trading",
+            "arguments": {**ARGS, "dry_run": False, "confirm": True},
+        },
+    )
     if access == "read":
         assert result.status_code == 403, result.text
         assert 'error="insufficient_scope"' in result.headers["www-authenticate"]
@@ -238,7 +284,9 @@ def test_read_only_scope_cannot_be_expanded_by_form(runtime):
     url = response.headers["location"]
     page = rt.http.get(url)
     assert 'name="allow_portfolio_writes"' not in page.text
-    refused = rt.http.post(url, data={**FORM, "access_mode": "write", "allow_portfolio_writes": "yes"}, follow_redirects=False)
+    refused = rt.http.post(
+        url, data={**FORM, "access_mode": "write", "allow_portfolio_writes": "yes"}, follow_redirects=False
+    )
     assert refused.status_code == 200 and not rt.provider._codes
     rt.authenticate.assert_not_awaited()
     token = login(rt, client, access="write", scope=OAUTH_SCOPE, legacy=True)
@@ -261,10 +309,14 @@ def test_missing_consent_can_continue_read_only(runtime):
 def test_preview_and_invalid_booleans_do_not_trigger_step_up(runtime):
     rt = runtime
     token = login(rt, register(rt))["access_token"]
-    result = rpc(rt, token, "tools/call", {"name": "stop_portfolio_trading", "arguments": {**ARGS, "dry_run": True}})
+    result = rpc(
+        rt, token, "tools/call", {"name": "stop_portfolio_trading", "arguments": {**ARGS, "dry_run": True}}
+    )
     assert result.status_code == 200 and result.json()["result"]["structuredContent"]["status"] == "preview"
     for args in ({"dry_run": "false", "confirm": True}, {"dry_run": False, "confirm": False}):
-        result = rpc(rt, token, "tools/call", {"name": "stop_portfolio_trading", "arguments": {**ARGS, **args}})
+        result = rpc(
+            rt, token, "tools/call", {"name": "stop_portfolio_trading", "arguments": {**ARGS, **args}}
+        )
         assert result.status_code == 200 and result.json()["result"]["isError"]
         assert "www-authenticate" not in result.headers
     rt.viking.execute_portfolio_control.assert_not_awaited()
@@ -307,9 +359,11 @@ def test_downgrade_revokes_old_write_only_for_same_connection(runtime, mode):
     other_client = login(rt, register(rt), access="write", mode=mode)
     other_user = login(rt, client, access="write", mode=mode, email="other@example.invalid")
     login(rt, client, access="read", mode=mode)
+
     def can_write(token):
         response = rpc(rt, token["access_token"], "tools/call", {"name": "get_authorization_status"})
         return response.json()["result"]["structuredContent"]["can_write"]
+
     assert not can_write(old)
     assert can_write(other_client) and can_write(other_user)
     if mode == "session":
@@ -320,16 +374,28 @@ def test_downgrade_revokes_old_write_only_for_same_connection(runtime, mode):
 
 
 async def test_legacy_remembered_token_survives_upgrade_but_not_explicit_downgrade(tmp_path):
-    settings = Settings(public_base_url=BASE, export_signing_key="fixture-key", oauth_client_store_path=tmp_path / "clients.json")
+    settings = Settings(
+        public_base_url=BASE,
+        export_signing_key="fixture-key",
+        oauth_client_store_path=tmp_path / "clients.json",
+    )
     provider = VikingOAuthProvider(settings)
     credentials = VikingCredentials(**{"email": FORM["email"], "api_key": FORM["api_key"], "role": "trader"})
     payload = {
-        "kind": "access", "email": credentials.email, "api_key": credentials.api_key, "role": credentials.role,
-        "client_id": "legacy-fixture", "scopes": BOTH, "resource": None,
-        "sub": provider._subject(credentials), "exp": int(time.time()) + 300,
+        "kind": "access",
+        "email": credentials.email,
+        "api_key": credentials.api_key,
+        "role": credentials.role,
+        "client_id": "legacy-fixture",
+        "scopes": BOTH,
+        "resource": None,
+        "sub": provider._subject(credentials),
+        "exp": int(time.time()) + 300,
     }
     nonce = secrets.token_bytes(12)
-    token = "v1_" + base64.urlsafe_b64encode(nonce + provider._cipher.encrypt(nonce, json.dumps(payload).encode(), TOKEN_AAD)).decode().rstrip("=")
+    token = "v1_" + base64.urlsafe_b64encode(
+        nonce + provider._cipher.encrypt(nonce, json.dumps(payload).encode(), TOKEN_AAD)
+    ).decode().rstrip("=")
     assert (await provider.load_access_token(token)).scopes == BOTH
     provider._grants.downgrade(payload["client_id"], payload["sub"])
     restarted = VikingOAuthProvider(settings)
@@ -342,10 +408,13 @@ async def test_legacy_remembered_token_survives_upgrade_but_not_explicit_downgra
 
 async def test_direct_tool_error_has_chatgpt_metadata(runtime, monkeypatch):
     import app.portfolio_tools as tools
+
     rt = runtime
     monkeypatch.setattr(tools, "get_access_token", lambda: SimpleNamespace(scopes=[OAUTH_SCOPE]))
     async with create_connected_server_and_client_session(rt.mcp, raise_exceptions=True) as session:
-        result = await session.call_tool("stop_portfolio_trading", {**ARGS, "dry_run": False, "confirm": True})
+        result = await session.call_tool(
+            "stop_portfolio_trading", {**ARGS, "dry_run": False, "confirm": True}
+        )
     assert result.isError
     assert result.meta["mcp/www_authenticate"]
     rt.factory.assert_not_called()
@@ -354,10 +423,23 @@ async def test_direct_tool_error_has_chatgpt_metadata(runtime, monkeypatch):
 def test_cors_exposes_step_up_challenge_without_cookies(runtime):
     rt = runtime
     token = login(rt, register(rt))["access_token"]
-    result = rt.http.post("/mcp", json={"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {
-        "name": "stop_portfolio_trading", "arguments": {**ARGS, "dry_run": False, "confirm": True},
-    }}, headers={"Origin": "https://k1forge.com", "Authorization": "Bearer " + token,
-                "Accept": "application/json, text/event-stream"})
+    result = rt.http.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": "stop_portfolio_trading",
+                "arguments": {**ARGS, "dry_run": False, "confirm": True},
+            },
+        },
+        headers={
+            "Origin": "https://k1forge.com",
+            "Authorization": "Bearer " + token,
+            "Accept": "application/json, text/event-stream",
+        },
+    )
     assert result.status_code == 403
     assert "WWW-Authenticate" in result.headers["access-control-expose-headers"]
     assert "access-control-allow-credentials" not in result.headers
@@ -367,7 +449,12 @@ def test_server_disabled_is_not_a_reauthorization_loop(runtime):
     rt = runtime
     token = login(rt, register(rt))["access_token"]
     rt.settings.viking_portfolio_writes_enabled = False
-    result = rpc(rt, token, "tools/call", {"name": "stop_portfolio_trading", "arguments": {**ARGS, "dry_run": False, "confirm": True}})
+    result = rpc(
+        rt,
+        token,
+        "tools/call",
+        {"name": "stop_portfolio_trading", "arguments": {**ARGS, "dry_run": False, "confirm": True}},
+    )
     assert result.status_code == 200 and result.json()["result"]["isError"]
     assert "administrator" in result.text
     assert "www-authenticate" not in result.headers

@@ -7,7 +7,6 @@ from typing import Annotated, Any, Literal
 
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
-from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, ResourceLink, TextContent, ToolAnnotations
 from pydantic import AnyHttpUrl, AnyUrl, Field
 from starlette.applications import Starlette
@@ -17,6 +16,13 @@ from starlette.responses import FileResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
 from starlette.types import Receive, Scope, Send
 
+from app.auth_compat import (
+    CompatibleFastMCP,
+    OAuthCompatibilityMiddleware,
+    metadata_routes,
+    offered_scopes,
+    register_auth_status,
+)
 from app.config import get_settings
 from app.export_store import ExportStore
 from app.oauth import OAUTH_SCOPE, PORTFOLIO_WRITE_SCOPE, VikingOAuthProvider
@@ -39,7 +45,7 @@ oauth_provider = VikingOAuthProvider(settings)
 issuer_url = AnyHttpUrl(settings.resolved_public_base_url)
 resource_url = AnyHttpUrl(f"{settings.resolved_public_base_url}/mcp")
 
-mcp = FastMCP(
+mcp = CompatibleFastMCP(
     "Viking Market Data",
     instructions=(
         "Пользователь уже прошёл безопасную браузерную OAuth-авторизацию. Никогда не проси "
@@ -119,7 +125,7 @@ mcp = FastMCP(
         client_registration_options=ClientRegistrationOptions(
             enabled=True,
             valid_scopes=[OAUTH_SCOPE, PORTFOLIO_WRITE_SCOPE],
-            default_scopes=[OAUTH_SCOPE],
+            default_scopes=offered_scopes(settings),
         ),
         required_scopes=[OAUTH_SCOPE],
         resource_server_url=resource_url,
@@ -1637,6 +1643,8 @@ async def download(request: Request):
     return FileResponse(path, media_type="text/csv", filename=filename.split("--", 1)[-1])
 
 
+register_auth_status(mcp, settings)
+
 _mcp_http_app = mcp.streamable_http_app()
 
 
@@ -1652,6 +1660,7 @@ async def lifespan(_: Starlette):
 
 _starlette_app = Starlette(
     routes=[
+        *metadata_routes(settings),
         Route("/health", health, methods=["GET"]),
         Route("/setup", setup_page, methods=["GET"]),
         Route(
@@ -1666,8 +1675,9 @@ _starlette_app = Starlette(
 )
 # Preflight has no bearer token; handle it before MCP's OAuth middleware.
 # Wrapping outside Starlette also keeps CORS headers on MCP error responses.
+_auth_compat_app = OAuthCompatibilityMiddleware(_starlette_app, settings=settings, provider=oauth_provider)
 _mcp_cors_app = CORSMiddleware(
-    _starlette_app,
+    _auth_compat_app,
     allow_origins=settings.cors_allowed_origins,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=[
@@ -1677,7 +1687,7 @@ _mcp_cors_app = CORSMiddleware(
         "Mcp-Session-Id",
         "Last-Event-ID",
     ],
-    expose_headers=["Mcp-Session-Id"],
+    expose_headers=["Mcp-Session-Id", "WWW-Authenticate"],
     allow_credentials=False,
 )
 
@@ -1687,7 +1697,7 @@ async def app(scope: Scope, receive: Receive, send: Send) -> None:
     if scope["type"] == "http" and scope["path"] in {"/mcp", "/mcp/"}:
         await _mcp_cors_app(scope, receive, send)
     else:
-        await _starlette_app(scope, receive, send)
+        await _auth_compat_app(scope, receive, send)
 
 
 def run() -> None:

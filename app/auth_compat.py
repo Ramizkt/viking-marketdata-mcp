@@ -1,4 +1,5 @@
 """OAuth interoperability without changing Viking operations or read-only contracts."""
+
 from __future__ import annotations
 
 import json
@@ -19,10 +20,15 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from app.config import Settings
 from app.oauth import OAUTH_SCOPE, PORTFOLIO_WRITE_SCOPE, VikingOAuthProvider
 
-WRITE_TOOL_NAMES = frozenset({
-    "update_portfolio_user_fields", "stop_portfolio_trading", "stop_portfolios",
-    "hard_stop_portfolios", "stop_portfolio_formulas",
-})
+WRITE_TOOL_NAMES = frozenset(
+    {
+        "update_portfolio_user_fields",
+        "stop_portfolio_trading",
+        "stop_portfolios",
+        "hard_stop_portfolios",
+        "stop_portfolio_formulas",
+    }
+)
 MAX_INSPECT_BYTES = 2 * 1024 * 1024
 
 
@@ -48,10 +54,13 @@ def challenge(settings: Settings, *, write: bool = False, invalid: bool = False)
 
 def write_auth_error(settings: Settings) -> CallToolResult:
     result = {
-        "status": "error", "error_type": "PermissionError", "code": "insufficient_scope",
-        "message": "This OAuth grant is read-only. Reauthorize with viking.portfolio.write and consent in the browser.",
+        "status": "error",
+        "error_type": "PermissionError",
+        "code": "insufficient_scope",
+        "message": "This OAuth grant is read-only. Reauthorize with viking.portfolio.write.",
         "required_scopes": [OAUTH_SCOPE, PORTFOLIO_WRITE_SCOPE],
-        "reauthorization_required": True, "operation_sent": False,
+        "reauthorization_required": True,
+        "operation_sent": False,
     }
     return CallToolResult(
         content=[TextContent(type="text", text=result["message"])],
@@ -82,7 +91,8 @@ def metadata_routes(settings: Settings) -> list[Route]:
     resource = AnyHttpUrl(f"{settings.resolved_public_base_url}/mcp")
     scopes = offered_scopes(settings)
     metadata = build_metadata(
-        issuer, AnyHttpUrl(f"{settings.resolved_public_base_url}/setup"),
+        issuer,
+        AnyHttpUrl(f"{settings.resolved_public_base_url}/setup"),
         ClientRegistrationOptions(enabled=True, valid_scopes=scopes, default_scopes=scopes),
         RevocationOptions(),
     )
@@ -90,20 +100,32 @@ def metadata_routes(settings: Settings) -> list[Route]:
     metadata.token_endpoint_auth_methods_supported = ["none", "client_secret_post", "client_secret_basic"]
 
     async def authorization_metadata(_: Request) -> JSONResponse:
-        return JSONResponse(metadata.model_dump(mode="json", exclude_none=True), headers={"Cache-Control": "no-store"})
+        return JSONResponse(
+            metadata.model_dump(mode="json", exclude_none=True), headers={"Cache-Control": "no-store"}
+        )
 
-    routes = [Route(
-        "/.well-known/oauth-authorization-server",
-        endpoint=cors_middleware(authorization_metadata, ["GET", "OPTIONS"]), methods=["GET", "OPTIONS"],
-    )]
+    routes = [
+        Route(
+            "/.well-known/oauth-authorization-server",
+            endpoint=cors_middleware(authorization_metadata, ["GET", "OPTIONS"]),
+            methods=["GET", "OPTIONS"],
+        )
+    ]
     protected = create_protected_resource_routes(
-        resource_url=resource, authorization_servers=[issuer], scopes_supported=scopes,
-        resource_name="Viking MCP", resource_documentation=AnyHttpUrl(f"{settings.resolved_public_base_url}/setup"),
+        resource_url=resource,
+        authorization_servers=[issuer],
+        scopes_supported=scopes,
+        resource_name="Viking MCP",
+        resource_documentation=AnyHttpUrl(f"{settings.resolved_public_base_url}/setup"),
     )
     routes.extend(protected)
-    routes.append(Route(
-        "/.well-known/oauth-protected-resource", endpoint=protected[0].endpoint, methods=["GET", "OPTIONS"],
-    ))
+    routes.append(
+        Route(
+            "/.well-known/oauth-protected-resource",
+            endpoint=protected[0].endpoint,
+            methods=["GET", "OPTIONS"],
+        )
+    )
     return routes
 
 
@@ -123,16 +145,21 @@ def register_auth_status(mcp: FastMCP, settings: Settings) -> None:
         enabled = settings.viking_portfolio_writes_enabled
         has_write = PORTFOLIO_WRITE_SCOPE in scopes
         return {
-            "authenticated": token is not None, "scopes": scopes,
+            "authenticated": token is not None,
+            "scopes": scopes,
             "portfolio_writes_enabled": enabled,
             "can_write": enabled and has_write and OAUTH_SCOPE in scopes,
             "reauthorization_required": enabled and not has_write,
-            "reason": "server_disabled" if not enabled else "scope_missing" if not has_write else "authorized",
+            "reason": "server_disabled"
+            if not enabled
+            else "scope_missing"
+            if not has_write
+            else "authorized",
             "required_write_scopes": [OAUTH_SCOPE, PORTFOLIO_WRITE_SCOPE],
             "viking_role_permissions_verified": False,
             "notes": [
-                "A read-only registration may require reconnecting/re-registering once with the advertised scopes.",
-                "Authorization does not execute/replay a pending operation; get explicit consent for the operation.",
+                "Old read-only registrations may need one reconnect using advertised scopes.",
+                "OAuth never executes pending operations; obtain explicit consent before execution.",
             ],
         }
 
@@ -174,12 +201,23 @@ class OAuthCompatibilityMiddleware:
                     bearer = headers.get("authorization", "").split()
                     if len(bearer) == 2 and bearer[0].lower() == "bearer":
                         token = await self.provider.load_access_token(bearer[1])
-                        if token and OAUTH_SCOPE in token.scopes and PORTFOLIO_WRITE_SCOPE not in token.scopes:
+                        if (
+                            token
+                            and OAUTH_SCOPE in token.scopes
+                            and PORTFOLIO_WRITE_SCOPE not in token.scopes
+                        ):
                             result = write_auth_error(self.settings)
                             response = JSONResponse(
-                                {"jsonrpc": "2.0", "id": message["id"], "result": result.model_dump(by_alias=True, exclude_none=True)},
+                                {
+                                    "jsonrpc": "2.0",
+                                    "id": message["id"],
+                                    "result": result.model_dump(by_alias=True, exclude_none=True),
+                                },
                                 status_code=403,
-                                headers={"WWW-Authenticate": challenge(self.settings, write=True), "Cache-Control": "no-store"},
+                                headers={
+                                    "WWW-Authenticate": challenge(self.settings, write=True),
+                                    "Cache-Control": "no-store",
+                                },
                             )
                             await response(scope, receive, send)
                             return
@@ -196,7 +234,9 @@ class OAuthCompatibilityMiddleware:
         async def rewrite_challenge(message: Message) -> None:
             if message["type"] == "http.response.start" and message["status"] == 401:
                 response_headers = MutableHeaders(scope=message)
-                response_headers["WWW-Authenticate"] = challenge(self.settings, invalid=bool(headers.get("authorization")))
+                response_headers["WWW-Authenticate"] = challenge(
+                    self.settings, invalid=bool(headers.get("authorization"))
+                )
                 response_headers["Cache-Control"] = "no-store"
             await send(message)
 
@@ -211,6 +251,9 @@ class OAuthCompatibilityMiddleware:
             return False
         name, args = params.get("name"), params.get("arguments")
         return (
-            isinstance(name, str) and name in WRITE_TOOL_NAMES and isinstance(args, dict)
-            and args.get("dry_run") is False and args.get("confirm") is True
+            isinstance(name, str)
+            and name in WRITE_TOOL_NAMES
+            and isinstance(args, dict)
+            and args.get("dry_run") is False
+            and args.get("confirm") is True
         )
