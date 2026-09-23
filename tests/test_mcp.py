@@ -35,6 +35,7 @@ async def test_mcp_lists_expected_tools():
         result = await session.list_tools()
     tools = {tool.name: tool for tool in result.tools}
     assert set(tools) == {
+        "get_authorization_status",
         "update_portfolio_user_fields",
         "stop_portfolio_trading",
         "stop_portfolios",

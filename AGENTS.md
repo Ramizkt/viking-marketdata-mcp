@@ -24,7 +24,7 @@ Production MCP:
 - health: `https://viking-marketdata-mcp-production.up.railway.app/health`;
 - setup: `https://viking-marketdata-mcp-production.up.railway.app/setup`.
 
-В актуальной версии реализованы 55 MCP-инструментов: 50 инструментов чтения и
+В актуальной версии реализованы 56 MCP-инструментов: 51 инструмент чтения и
 5 отдельно разрешаемых инструментов изменения uf0–uf19 и остановки портфелей.
 Сервер не создаёт портфели, не включает торговлю, не выставляет заявки и не
 отправляет торговые сигналы. Hard stop/Stop formulas могут снимать существующие заявки.
@@ -888,3 +888,43 @@ Hard stop/Stop formulas остаются отдельными полными о�
 остановки и не разрешает расширить её на другой флаг или автоматически повторить.
 Тесты проверяют enum/default side, payload через полный MCP-путь для одного
 портфеля и списка, dry_run без записи, отклонение неверного side до сервиса.
+
+
+## OAuth interoperability (2026-09-23)
+
+Актуальный контракт OAuth дополняет секцию 5: `app/auth_compat.py` публикует полный
+предлагаемый scope при включённой записи, не делает write обязательным для чтения.
+Старые явно заданные scope не расширять. При запросе обоих scope новая форма
+`access_mode=read/write` сужает grant до read по умолчанию; write требует прежнего
+allow_portfolio_writes=yes. Legacy POST без access_mode сохраняет старый контракт
+Lovable. Не добавлять обязательный JS/cookie/новое поле к этому программному flow.
+
+Перед выполнением подтверждённой записи без scope HTTP middleware возвращает
+403 + WWW-Authenticate insufficient_scope и MCP error metadata; в Viking ничего
+не отправляется. Прямой tool-result тоже несёт mcp/www_authenticate. Старый frontend
+может потребовать адаптацию именно error path 403, не успешных данных/подписок.
+Не превращать API rejection/тайм-аут отправленной команды в auth challenge.
+Не повторять автоматически торговые команды после OAuth.
+
+56 инструментов: новый get_authorization_status — read-only, без вызова Viking,
+без секретов; can_write описывает MCP, не права конкретной роли платформы.
+Неизменные существующие схемы/аннотации дополняются securitySchemes metadata.
+
+Явное снижение прав в новой форме повышает grant_generation в отдельном SQLite
+store рядом с oauth-clients.json: только хэш (client_id, subject) и счётчик, не
+credentials. Старые токены принимаются для чтения, но write и refresh не обходят
+новый generation. Новые grants связываются с generation в момент авторизации,
+не в момент обмена кода. Другие client_id/пользователи/роли не затрагиваются.
+Не удалять store и не вращать ключ токенов ради миграции. Общая файловая политика
+рассчитана на текущий single-replica volume; масштабирование требует общего store.
+Ошибки чтения политики fail-closed для write, но не для read. Session tokens всё
+ещё в RAM: рестарт потребует их переавторизации, это не исправлено этой задачей.
+
+Тестировать полный DCR + S256 + form POST + code exchange + MCP 401/403 + refresh,
+новый выбор read/write, старый Lovable flow, legacy v1_/s1_ и downgrade isolation.
+Не выдавать симуляцию клиента за live Claude/ChatGPT/Codex. Матрица реальной приёмки
+и client follow-ups хранятся в docs/oauth-compatibility.md. Viking wire-контракт
+не меняется: роль по api.md остаётся отдельным пределом прав.
+
+При отсутствующем scope на /authorize используется набор регистрации клиента,
+не глобальный default: старый read-only client_id остаётся read-only.

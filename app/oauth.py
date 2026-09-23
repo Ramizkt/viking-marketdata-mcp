@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import secrets
+import sqlite3
 import time
 from dataclasses import dataclass
 from typing import Literal
@@ -34,6 +35,7 @@ from starlette.responses import HTMLResponse, RedirectResponse
 
 from app.config import Settings
 from app.credentials import VikingCredentials
+from app.grant_versions import GrantVersions
 from app.viking_client import VikingClient
 
 logger = logging.getLogger(__name__)
@@ -47,6 +49,7 @@ TOKEN_AAD = b"viking-marketdata-mcp-token-v1"
 class VikingAuthorizationCode(AuthorizationCode):
     credentials: VikingCredentials
     mode: CredentialMode
+    grant_generation: int = 0
 
 
 @dataclass
@@ -70,6 +73,7 @@ class SessionRefreshToken:
     credentials: VikingCredentials
     resource: str | None
     absolute_expires_at: int
+    grant_generation: int = 0
 
 
 class RecoverableOAuthClient(OAuthClientInformationFull):
@@ -100,6 +104,7 @@ class VikingOAuthProvider(
         self.settings = settings
         self.base_url = settings.resolved_public_base_url
         self._client_store_path = settings.resolved_oauth_client_store_path
+        self._grants = GrantVersions(self._client_store_path.with_name("oauth-grants.sqlite3"))
         self._clients = self._load_clients()
         self._clients_lock = asyncio.Lock()
         self._pending: dict[str, PendingAuthorization] = {}
@@ -168,6 +173,12 @@ class VikingOAuthProvider(
     ) -> str:
         if not client.client_id:
             raise AuthorizeError("invalid_request", "client_id is required")
+        if params.resource not in (None, f"{self.base_url}/mcp"):
+            raise AuthorizeError("invalid_request", "resource must identify this MCP server")
+        if params.scopes is None:
+            # Omitted scopes use this registration, not the new global defaults.
+            # Explicit old read registrations therefore remain read-only.
+            params = params.model_copy(update={"scopes": (client.scope or OAUTH_SCOPE).split()})
         requested_scopes = set(params.scopes or [OAUTH_SCOPE])
         registered_scopes = set((client.scope or OAUTH_SCOPE).split())
         if (
@@ -175,7 +186,11 @@ class VikingOAuthProvider(
             or not requested_scopes.issubset({OAUTH_SCOPE, PORTFOLIO_WRITE_SCOPE})
             or not requested_scopes.issubset(registered_scopes)
         ):
-            raise AuthorizeError("invalid_scope", "Requested scope is not registered for this client")
+            raise AuthorizeError(
+                "invalid_scope",
+                "Requested scope is not registered for this client. Reconnect with a new registration "
+                "using the advertised scopes; existing read-only tokens remain usable.",
+            )
         if PORTFOLIO_WRITE_SCOPE in requested_scopes and not self.settings.viking_portfolio_writes_enabled:
             raise AuthorizeError("invalid_scope", "Portfolio writes are disabled by the server administrator")
         recovered_client = None
@@ -219,7 +234,10 @@ class VikingOAuthProvider(
         if stored is None or stored.client_id != client.client_id:
             raise TokenError("invalid_grant", "authorization code was already used")
 
-        scopes = stored.scopes or [OAUTH_SCOPE]
+        scopes = await self._effective_scopes(
+            stored.client_id, self._subject(stored.credentials),
+            stored.scopes or [OAUTH_SCOPE], stored.grant_generation,
+        )
         now = int(time.time())
         subject = self._subject(stored.credentials)
 
@@ -231,6 +249,7 @@ class VikingOAuthProvider(
                 resource=stored.resource,
                 subject=subject,
                 absolute_expires_at=now + self.settings.oauth_session_max_ttl_seconds,
+                grant_generation=stored.grant_generation,
             )
 
         ttl = self.settings.oauth_persistent_token_ttl_seconds
@@ -241,6 +260,7 @@ class VikingOAuthProvider(
             resource=stored.resource,
             subject=subject,
             expires_at=now + ttl,
+            grant_generation=stored.grant_generation,
         )
         return OAuthToken(
             access_token=token,
@@ -283,13 +303,18 @@ class VikingOAuthProvider(
         if not set(requested_scopes).issubset(stored.refresh.scopes):
             raise TokenError("invalid_scope", "requested scope exceeds the original grant")
 
+        effective_scopes = await self._effective_scopes(
+            stored.refresh.client_id, stored.refresh.subject or self._subject(stored.credentials),
+            requested_scopes, stored.grant_generation,
+        )
         return self._issue_session_tokens(
             credentials=stored.credentials,
             client_id=stored.refresh.client_id,
-            scopes=requested_scopes,
+            scopes=effective_scopes,
             resource=stored.resource,
             subject=stored.refresh.subject or self._subject(stored.credentials),
             absolute_expires_at=stored.absolute_expires_at,
+            grant_generation=stored.grant_generation,
         )
 
     async def load_access_token(self, token: str) -> AccessToken | None:
@@ -304,8 +329,14 @@ class VikingOAuthProvider(
             ) or idle_for > self.settings.oauth_session_idle_ttl_seconds:
                 self._session_tokens.pop(token, None)
                 return None
+            if stored.access.resource not in (None, f"{self.base_url}/mcp"):
+                return None
             stored.last_used = time.monotonic()
-            return stored.access
+            effective = await self._effective_scopes(
+                stored.access.client_id, stored.access.subject or self._subject(stored.credentials),
+                stored.access.scopes, (stored.access.claims or {}).get("grant_generation", 0),
+            )
+            return stored.access.model_copy(update={"scopes": effective})
 
         payload = self._decrypt_token(token)
         if payload is None or payload.get("kind") != "access":
@@ -314,17 +345,40 @@ class VikingOAuthProvider(
             expires_at = int(payload["exp"])
             if expires_at <= int(time.time()):
                 return None
+            if payload.get("resource") not in (None, f"{self.base_url}/mcp"):
+                return None
+            effective = await self._effective_scopes(
+                str(payload["client_id"]), str(payload["sub"]),
+                [str(scope) for scope in payload["scopes"]], payload.get("grant_generation", 0),
+            )
             return AccessToken(
                 token=token,
                 client_id=str(payload["client_id"]),
-                scopes=[str(scope) for scope in payload["scopes"]],
+                scopes=effective,
                 expires_at=expires_at,
                 resource=payload.get("resource"),
                 subject=str(payload["sub"]),
-                claims={"iss": self.base_url, "credential_mode": "local"},
+                claims={
+                    "iss": self.base_url, "credential_mode": "local",
+                    "grant_generation": payload.get("grant_generation", 0),
+                },
             )
         except (KeyError, TypeError, ValueError):
             return None
+
+    async def _effective_scopes(
+        self, client_id: str, subject: str, scopes: list[str], generation: int,
+    ) -> list[str]:
+        if PORTFOLIO_WRITE_SCOPE not in scopes:
+            return list(scopes)
+        try:
+            current = await asyncio.to_thread(self._grants.current, client_id, subject)
+        except (OSError, sqlite3.Error, ValueError):
+            logger.error("Cannot read OAuth grant policy; write scope denied, read scope retained")
+            return [scope for scope in scopes if scope != PORTFOLIO_WRITE_SCOPE]
+        if generation != current:
+            return [scope for scope in scopes if scope != PORTFOLIO_WRITE_SCOPE]
+        return list(scopes)
 
     async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
         self._session_tokens.pop(token.token, None)
@@ -356,7 +410,7 @@ class VikingOAuthProvider(
             self._pending.pop(pending_id, None)
             return self._render_page(
                 pending_id,
-                error="Ссылка устарела. Вернитесь в Codex и нажмите «Авторизоваться» ещё раз.",
+                error="Ссылка устарела. Вернитесь в ваше ИИ-приложение и начните авторизацию ещё раз.",
                 disabled=True,
             )
 
@@ -380,7 +434,18 @@ class VikingOAuthProvider(
                 error="Заполните email и API key.",
             )
 
-        if PORTFOLIO_WRITE_SCOPE in (pending.params.scopes or []) and (
+        selected_access = str(form.get("access_mode", ""))
+        granted_scopes = list(pending.params.scopes or [OAUTH_SCOPE])
+        if selected_access not in {"", "read", "write"} or (
+            selected_access == "write" and PORTFOLIO_WRITE_SCOPE not in granted_scopes
+        ):
+            return self._render_page(
+                pending_id, selected_mode=mode, email=email, role=role,
+                error="Выбранные права не входят в запрос клиента. Начните новую авторизацию.",
+            )
+        if selected_access == "read":
+            granted_scopes = [OAUTH_SCOPE]
+        if PORTFOLIO_WRITE_SCOPE in granted_scopes and (
             not self.settings.viking_portfolio_writes_enabled
             or form.get("allow_portfolio_writes") != "yes"
         ):
@@ -418,12 +483,24 @@ class VikingOAuthProvider(
                     error="Не удалось восстановить OAuth-сессию. Повторите попытку позже.",
                 )
 
+        try:
+            # Explicit read choice revokes old write grants only for this client/user/role.
+            # Legacy form POSTs without access_mode retain their existing semantics.
+            operation = self._grants.downgrade if selected_access == "read" else self._grants.current
+            generation = await asyncio.to_thread(operation, pending.client_id, self._subject(credentials))
+        except (OSError, sqlite3.Error, ValueError):
+            logger.error("Could not persist OAuth permission choice")
+            return self._render_page(
+                pending_id, selected_mode=mode, email=email, role=role,
+                error="Не удалось сохранить выбор прав. Повторите авторизацию позже.",
+            )
         self._pending.pop(pending_id, None)
         code_value = secrets.token_urlsafe(32)
         params = pending.params
         self._codes[code_value] = VikingAuthorizationCode(
             code=code_value,
-            scopes=params.scopes or [OAUTH_SCOPE],
+            scopes=granted_scopes,
+            grant_generation=generation,
             expires_at=time.time() + 120,
             client_id=pending.client_id,
             code_challenge=params.code_challenge,
@@ -474,6 +551,7 @@ class VikingOAuthProvider(
         resource: str | None,
         subject: str,
         absolute_expires_at: int,
+        grant_generation: int = 0,
     ) -> OAuthToken:
         now = int(time.time())
         expires_at = min(
@@ -491,7 +569,7 @@ class VikingOAuthProvider(
             expires_at=expires_at,
             resource=resource,
             subject=subject,
-            claims={"iss": self.base_url, "credential_mode": "session"},
+            claims={"iss": self.base_url, "credential_mode": "session", "grant_generation": grant_generation},
         )
         self._session_tokens[access_token] = SessionToken(
             access=access,
@@ -512,6 +590,7 @@ class VikingOAuthProvider(
             credentials=credentials,
             resource=resource,
             absolute_expires_at=absolute_expires_at,
+            grant_generation=grant_generation,
         )
         return OAuthToken(
             access_token=access_token,
@@ -595,6 +674,7 @@ class VikingOAuthProvider(
         resource: str | None,
         subject: str,
         expires_at: int,
+        grant_generation: int = 0,
     ) -> str:
         payload = json.dumps(
             {
@@ -607,6 +687,7 @@ class VikingOAuthProvider(
                 "resource": resource,
                 "sub": subject,
                 "exp": expires_at,
+                "grant_generation": grant_generation,
             },
             separators=(",", ":"),
         ).encode()
@@ -645,14 +726,29 @@ class VikingOAuthProvider(
     ) -> HTMLResponse:
         pending = self._pending.get(pending_id)
         write_requested = pending is not None and PORTFOLIO_WRITE_SCOPE in (pending.params.scopes or [])
-        write_consent_html = ""
+        write_consent_html = (
+            '<input type="hidden" name="access_mode" value="read">'
+            '<p>Клиент запросил только чтение. Для управления портфелями начните '
+            'повторное подключение с расширенными правами.</p>'
+        )
         if write_requested:
             write_consent_html = (
+                '<fieldset><legend>Доступ этого подключения</legend>'
+                '<label><input type="radio" name="access_mode" value="read" checked '
+                'style="width:auto"> Только чтение (отозвать прежнее право записи этого подключения)</label>'
+                '<label><input type="radio" name="access_mode" value="write" '
+                'style="width:auto"> Чтение и управление портфелями</label></fieldset>'
                 '<div class="error">Клиент запрашивает изменение uf0–uf19 и остановку торговли. '
                 'Stop formulas также отключает формулы. Эти операции могут влиять на торговлю.</div>'
                 '<label><input type="checkbox" name="allow_portfolio_writes" value="yes" '
-                'style="width:auto" required> Разрешаю изменение пользовательских полей и остановки '
+                'style="width:auto"> Разрешаю изменение пользовательских полей и остановки '
                 'портфелей через этот MCP-клиент (viking.portfolio.write).</label>'
+            )
+        if pending:
+            target_host = html.escape(urlparse(str(pending.params.redirect_uri)).netloc)
+            write_consent_html = (
+                f'<p>Получатель авторизации: <strong>{target_host}</strong>. '
+                'Проверьте адрес приложения перед вводом ключа.</p>' + write_consent_html
             )
         selected_json = json.dumps(selected_mode)
         error_html = f'<div class="error">{html.escape(error)}</div>' if error else ""
@@ -702,7 +798,8 @@ class VikingOAuthProvider(
     </button>
     <button class="mode" type="button" data-mode="local"{disabled_attr}>
       <strong>Запомнить на этом компьютере</strong>
-      <span>Codex сохранит зашифрованный токен локально. Railway не ведёт пользовательскую базу.</span>
+      <span>Ваше ИИ-приложение сохранит зашифрованный токен.
+      У облачного клиента он хранится на его стороне.</span>
     </button>
   </div>
   <form method="post" class="{form_hidden.strip()}">

@@ -11,6 +11,8 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import Field, StrictBool
 
+from app.auth_compat import WRITE_TOOL_NAMES as WRITE_TOOL_NAMES
+from app.auth_compat import write_auth_error
 from app.config import Settings
 from app.oauth import PORTFOLIO_WRITE_SCOPE
 from app.portfolio_control import (
@@ -25,15 +27,7 @@ from app.service import MarketDataService
 from app.viking_client import VikingAPIError
 
 Targets = Annotated[list[PortfolioTarget], Field(min_length=1, max_length=MAX_TARGETS)]
-WRITE_TOOL_NAMES = frozenset(
-    {
-        "update_portfolio_user_fields",
-        "stop_portfolio_trading",
-        "stop_portfolios",
-        "hard_stop_portfolios",
-        "stop_portfolio_formulas",
-    }
-)
+
 WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True)
 COMMON = (
     " По умолчанию dry_run=true: только предпросмотр без изменений. Исполнение требует "
@@ -55,10 +49,7 @@ def register_portfolio_control_tools(
                     raise PermissionError("Portfolio writes are disabled by the server administrator")
                 token = get_access_token()
                 if token is None or PORTFOLIO_WRITE_SCOPE not in token.scopes:
-                    raise PermissionError(
-                        "This OAuth grant is read-only. Reauthorize with viking.portfolio.write "
-                        "and consent in the browser. Old grants are not upgraded automatically."
-                    )
+                    return write_auth_error(settings)
             service = service_factory()
             result = await PortfolioControlService(service.client).run(
                 **operation, dry_run=dry_run, confirm=confirm
