@@ -452,9 +452,9 @@ api.md описывает `rv` и `sv`, но нигде не обещает, ч�
 Требуются Python 3.11+ и `uv`.
 
 ```bash
-uv sync --dev
-uv run pytest
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+uv sync --locked
+uv run --locked pytest
+uv run --locked uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 Локальные адреса:
@@ -464,6 +464,15 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 - MCP: `http://127.0.0.1:8000/mcp`.
 
 ## Railway
+
+Production Dockerfile устанавливает Python-пакеты по `uv.lock` через
+`uv sync --locked --no-dev --no-editable`, а не по плавающим диапазонам.
+Отсутствующий или устаревший lock останавливает build. При старте пакеты
+не переустанавливаются; PORT, /health и постоянный Volume /data сохранены.
+CI проверяет фактические версии production-образа, запускает полные тесты
+установленного wheel в отдельном test-only контейнере и HTTP smoke.
+Обновление зависимостей требует явного изменения lock и прохождения CI.
+[Контракт сборки, проверки и rollout](docs/locked-builds.md).
 
 Проект содержит `Dockerfile` и `railway.json`. Нужны публичный домен и Volume
 с mount path `/data`.

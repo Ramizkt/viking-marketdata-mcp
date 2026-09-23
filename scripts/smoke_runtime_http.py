@@ -1,4 +1,5 @@
 """Run inside a network-disabled container started with its production CMD."""
+
 from __future__ import annotations
 
 import base64
@@ -59,31 +60,52 @@ def main() -> None:
     metadata = json.loads(body)
     assert status == 200 and set(metadata["scopes_supported"]) == SCOPES
     assert metadata["registration_endpoint"] == BASE + "/register"
-    status, headers, _ = request("/mcp", method="POST", data={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+    status, headers, _ = request(
+        "/mcp", method="POST", data={"jsonrpc": "2.0", "id": 1, "method": "initialize"}
+    )
     assert status == 401
     assert 'resource_metadata="' in headers["WWW-Authenticate"]
     assert 'scope="viking.read"' not in headers["WWW-Authenticate"]
     print("PASS public OAuth metadata / unauthenticated 401")
-    status, headers, _ = request("/mcp", method="OPTIONS", headers={
-        "Origin": "https://k1forge.com", "Access-Control-Request-Method": "POST",
-        "Access-Control-Request-Headers": "authorization,content-type",
-    })
+    status, headers, _ = request(
+        "/mcp",
+        method="OPTIONS",
+        headers={
+            "Origin": "https://k1forge.com",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        },
+    )
     assert status == 200 and headers["Access-Control-Allow-Origin"] == "https://k1forge.com"
-    status, _, body = request("/register", method="POST", data={
-        "client_name": "container-smoke-no-credentials",
-        "redirect_uris": ["http://127.0.0.1:9999/callback"],
-        "token_endpoint_auth_method": "none",
-        "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
-    })
+    status, _, body = request(
+        "/register",
+        method="POST",
+        data={
+            "client_name": "container-smoke-no-credentials",
+            "redirect_uris": ["http://127.0.0.1:9999/callback"],
+            "token_endpoint_auth_method": "none",
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+        },
+    )
     client = json.loads(body)
     assert status == 201 and set(client["scope"].split()) == SCOPES
     verifier = "container-smoke-verifier-" * 3
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
-    status, headers, _ = request("/authorize?" + urlencode({
-        "response_type": "code", "client_id": client["client_id"],
-        "redirect_uri": "http://127.0.0.1:9999/callback", "state": "container-smoke",
-        "code_challenge": challenge, "code_challenge_method": "S256", "resource": BASE + "/mcp",
-    }))
+    status, headers, _ = request(
+        "/authorize?"
+        + urlencode(
+            {
+                "response_type": "code",
+                "client_id": client["client_id"],
+                "redirect_uri": "http://127.0.0.1:9999/callback",
+                "state": "container-smoke",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "resource": BASE + "/mcp",
+            }
+        )
+    )
     assert status in (302, 303, 307)
     location = headers["Location"]
     assert location.startswith(BASE + "/oauth/connect/")

@@ -15,7 +15,8 @@ REQUIREMENTS = 'mcp==1.28.1\ncolorama==0.4.6 ; sys_platform == "win32"\n'
 INVENTORY = {
     "packages": {"mcp": "1.28.1", "viking-marketdata-mcp": "0.1.0"},
     "editable": [],
-    "prefix": "/app/.venv", "base_prefix": "/usr/local",
+    "prefix": "/app/.venv",
+    "base_prefix": "/usr/local",
     "app_location": "/app/.venv/lib/python3.12/site-packages/app/__init__.py",
     "lock_sha256": hashlib.sha256(LOCK).hexdigest(),
     "marker_environment": {"python_version": "3.12", "sys_platform": "linux"},
@@ -63,7 +64,7 @@ def test_docker_and_ci_keep_same_uv_version_and_locked_install():
     runtime = docker.split("FROM python-base AS runtime", 1)[1]
     assert "COPY --from=builder /app/.venv /app/.venv" in runtime
     assert "uv sync" not in runtime and "COPY app" not in runtime
-    assert 'exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT}' in runtime
+    assert "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT}" in runtime
 
 
 def test_container_test_image_does_not_shadow_installed_application():

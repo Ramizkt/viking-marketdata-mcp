@@ -1,4 +1,5 @@
 """Capture with stdlib inside an image; verify with locked dev tooling outside it."""
+
 from __future__ import annotations
 
 import argparse
@@ -79,7 +80,10 @@ def expected_packages(requirements: str, environment: dict[str, str]) -> dict[st
 
 
 def verify(
-    inventory: dict[str, Any], requirements: str, project: dict[str, Any], lock_bytes: bytes,
+    inventory: dict[str, Any],
+    requirements: str,
+    project: dict[str, Any],
+    lock_bytes: bytes,
 ) -> dict[str, str]:
     environment = inventory["marker_environment"]
     if environment["python_version"] != "3.12" or environment["sys_platform"] != "linux":
@@ -98,10 +102,15 @@ def verify(
     actual = inventory["packages"]
     missing = sorted(set(expected) - set(actual))
     extra = sorted(set(actual) - set(expected))
-    different = {name: {"expected": expected[name], "actual": actual[name]}
-                 for name in expected.keys() & actual.keys() if expected[name] != actual[name]}
+    different = {
+        name: {"expected": expected[name], "actual": actual[name]}
+        for name in expected.keys() & actual.keys()
+        if expected[name] != actual[name]
+    }
     if missing or extra or different:
-        raise ValueError(json.dumps({"missing": missing, "extra": extra, "different": different}, sort_keys=True))
+        raise ValueError(
+            json.dumps({"missing": missing, "extra": extra, "different": different}, sort_keys=True)
+        )
     return dict(sorted(expected.items()))
 
 
@@ -120,8 +129,10 @@ def main() -> None:
         print(json.dumps(capture(args.lock), indent=2, sort_keys=True))
     else:
         packages = verify(
-            json.loads(args.inventory.read_text()), args.requirements.read_text(),
-            tomllib.loads(args.project.read_text())["project"], args.lock.read_bytes(),
+            json.loads(args.inventory.read_text()),
+            args.requirements.read_text(),
+            tomllib.loads(args.project.read_text())["project"],
+            args.lock.read_bytes(),
         )
         print(f"Verified {len(packages)} exact package versions and uv.lock SHA-256.")
         for name, version in packages.items():
