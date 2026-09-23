@@ -27,6 +27,20 @@ jobs:
           test "$GITHUB_REF" = refs/heads/agent/oauth-client-compatibility
           sed -i '/if False else s/d' scripts/_apply_oauth_compat.py
           python scripts/_apply_oauth_compat.py
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('app/auth_compat.py')
+          s = p.read_text()
+          s = s.replace('This OAuth grant is read-only. Reauthorize with viking.portfolio.write and consent in the browser.', 'This OAuth grant is read-only. Reauthorize with viking.portfolio.write.')
+          s = s.replace('A read-only registration may require reconnecting/re-registering once with the advertised scopes.', 'Old read-only registrations may need one reconnect using advertised scopes.')
+          s = s.replace('Authorization does not execute/replay a pending operation; get explicit consent for the operation.', 'OAuth never executes pending operations; obtain explicit consent before execution.')
+          p.write_text(s)
+          p = Path('app/oauth.py')
+          s = p.read_text()
+          s = s.replace('claims={"iss": self.base_url, "credential_mode": "local", "grant_generation": payload.get("grant_generation", 0)},', 'claims={\n                    "iss": self.base_url, "credential_mode": "local",\n                    "grant_generation": payload.get("grant_generation", 0),\n                },')
+          s = s.replace('сохранит зашифрованный токен. У облачного клиента', 'сохранит зашифрованный токен.\n      У облачного клиента')
+          p.write_text(s)
+          PY
           rm scripts/_apply_oauth_compat.py .github/workflows/oauth-compat-integration.yml
       - name: Locked dependencies
         run: uv sync --locked
