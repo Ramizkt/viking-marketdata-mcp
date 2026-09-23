@@ -1,0 +1,51 @@
+name: OAuth compatibility integration
+on:
+  push:
+    branches: ['agent/oauth-client-compatibility']
+permissions:
+  contents: write
+concurrency:
+  group: oauth-compat-integration
+  cancel-in-progress: false
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4
+        with:
+          version: '0.12.17'
+          python-version: '3.12'
+          enable-cache: false
+      - name: Apply exact integration patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/agent/oauth-client-compatibility
+          sed -i '/if False else s/d' scripts/_apply_oauth_compat.py
+          python scripts/_apply_oauth_compat.py
+          rm scripts/_apply_oauth_compat.py .github/workflows/oauth-compat-integration.yml
+      - name: Locked dependencies
+        run: uv sync --locked
+      - name: Format new files and lint
+        run: |
+          uv run ruff format app/auth_compat.py app/grant_versions.py tests/test_oauth_compatibility.py
+          uv run ruff check app/auth_compat.py app/grant_versions.py app/oauth.py app/main.py app/portfolio_tools.py tests/test_oauth_compatibility.py --fix
+          uv run ruff check .
+      - name: Full regression tests (mocked Viking only)
+        run: uv run pytest -q
+      - name: Commit tested integration to feature branch only
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/agent/oauth-client-compatibility
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/main.py app/oauth.py app/portfolio_tools.py app/auth_compat.py app/grant_versions.py tests/test_mcp.py tests/test_oauth_compatibility.py README.md AGENTS.md scripts/_apply_oauth_compat.py .github/workflows/oauth-compat-integration.yml
+          git diff --cached --check
+          git commit -m 'Integrate optional OAuth grants, client discovery and safe step-up; preserve legacy clients'
+          git push origin HEAD:refs/heads/agent/oauth-client-compatibility
+          git show --stat --oneline HEAD
