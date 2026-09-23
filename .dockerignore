@@ -1,9 +1,11 @@
 .git
 .env
+.env.*
 .venv
-__pycache__
+**/__pycache__
 .pytest_cache
 .ruff_cache
 data
-tests
-
+*.sqlite3
+*.sqlite3-*
+# Tests are available to Dockerfile.ci only; production COPY is an explicit allowlist.

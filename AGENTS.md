@@ -622,7 +622,7 @@ number. Фильтр `security_key` передаётся в Viking как `sec_k
    аргументы, корректные annotations, понятное описание и безопасный результат.
 7. **Проверка и документация** — добавить тесты клиента, сервиса и MCP, при
    необходимости OAuth/export regression; обновить `README.md` и этот файл;
-   выполнить `uv run ruff check .` и `uv run pytest -q`.
+   выполнить `uv run --locked ruff check .` и `uv run --locked pytest -q`.
 8. **Публикация** — создать ветку `agent/<short-description>`, закоммитить только
    относящиеся к задаче файлы, заполнить `.github/pull_request_template.md` и
    открыть draft PR с описанием API-контракта и проверок. Не сливать PR и не
@@ -637,29 +637,27 @@ number. Фильтр `security_key` передаётся в Viking как `sec_k
 5. отдельно проверить `tools/list` или целевой MCP-вызов — merge в `main` сам по
    себе не доказывает, что runtime уже пересобран.
 
-В репозитории есть один процессный GitHub Actions workflow:
-`.github/workflows/agents-context.yml`. Он запускается для pull request и требует
-изменить `AGENTS.md` в том же PR, если затронуты `app/`, `.github/`, `Dockerfile`,
-`railway.json`, `pyproject.toml`, `uv.lock` или `.env.example`.
-
-Проверка подтверждает только наличие изменения `AGENTS.md`, но не его качество.
-Обновляйте содержание по существу: новые методы, инструменты, аргументы, ошибки,
-архитектурные решения, авторизацию, эксплуатацию и ограничения. Формальное
-изменение пробела или даты не считается корректной актуализацией контекста.
-
-Этот workflow не запускает Ruff или pytest и не является полным CI. Нельзя
-писать, что тесты или CI прошли, если выполнялась только проверка
-`AGENTS.md consistency` или только локальные команды.
+В репозитории есть два постоянных CI workflow:
+`.github/workflows/agents-context.yml` проверяет содержательную актуализацию
+AGENTS.md при изменениях кода/config/deploy, а `python-tests.yml` выполняет
+locked regression suite и Ruff на Python 3.11/3.12, сборку production Docker,
+сравнение всех установленных версий с экспортом uv.lock и полные тесты
+установленного wheel в производном test-only образе без внешней сети.
+Отдельно проверяются штатный CMD/PORT/health/OAuth discovery/CORS и отказ
+сборки при устаревшем lock. Тесты не используют реальные Viking credentials.
+Проверка AGENTS.md сама по себе не доказывает успех тестов или deploy.
+Обновление документации должно быть по существу, а не пробелом/датой.
+Полный контракт и границы воспроизводимости: docs/locked-builds.md.
 
 ## 10. Тестирование и правила кода
 
 Основные команды:
 
 ```bash
-uv sync --dev
-uv run ruff check .
-uv run pytest -q
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+uv sync --locked
+uv run --locked ruff check .
+uv run --locked pytest -q
+uv run --locked uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 Настройки Ruff:
@@ -686,6 +684,21 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 одновременно с добавлением API-метода без отдельного согласования.
 
 ## 11. Deploy и эксплуатация
+
+Python-зависимости production устанавливаются только через
+`uv sync --locked --no-dev --no-editable` из закоммиченного uv.lock.
+Dockerfile использует uv 0.12.17, как CI; runtime копирует готовую .venv,
+запускает установленный wheel и не устанавливает пакеты при старте.
+Не возвращать pip install . / автоматический re-lock / --frozen fallback.
+Изменение pyproject.toml без соответствующего lock должно ломать сборку.
+Dockerfile.ci — только тестовый образ; его нельзя выбирать в Railway.
+Все runtime-версии сверяются с lock, dev-пакеты исключены из production;
+`scripts/check_runtime_lock.py` также проверяет SHA-256 lock и импорт wheel.
+Это фиксация Python runtime, не побитовая воспроизводимость ОС/base images.
+При обновлении uv согласованно менять Dockerfiles/CI и проверку build policy.
+API/OAuth, PORT, /health и Volume /data этим контрактом не меняются.
+Не удалять OAuth stores и не вращать секреты для перехода на locked build.
+Подробнее: docs/locked-builds.md.
 
 Для прямых запросов браузерного MCP-клиента внешняя `CORSMiddleware` обрабатывает
 пути `/mcp` и `/mcp/`, включая preflight до OAuth и заголовки ошибок. Остальные
@@ -868,7 +881,7 @@ r_id/p_id. verified=false до отдельной проверки. Состоя
 через robot.subscribe / get_robot_portfolio_trading_status, а не disabled.
 
 Проверки: `tests/test_portfolio_controls.py`, `tests/test_portfolio_control_oauth.py`;
-полный `uv run pytest -q`, `uv run ruff check app tests`. README и число 55 инструментов
+полный `uv run --locked pytest -q`, `uv run ruff check app tests`. README и число 55 инструментов
 обязательны для этой поставки. Live-проверки остановок разрешены только на явно
 выбранных пользователем тестовых портфелях. Этот PR сам по себе не разрешает merge,
 production deploy или реальные операции с портфелями.
