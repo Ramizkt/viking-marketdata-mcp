@@ -83,12 +83,7 @@ jobs:
           [Контракт сборки, проверки и rollout](docs/locked-builds.md).
           ''')
           p.write_text(s)
-          p = Path('.github/workflows/python-tests.yml')
-          s = p.read_text().replace('          import sys\n', '          import sys\n          import tomllib\n')
-          s = s.replace("          old = 'version = \"0.1.0\"'", "          version = tomllib.loads(text)['project']['version']\n          old = f'version = \"{version}\"'")
-          p.write_text(s)
           PY
-          rm .github/workflows/locked-build-prep.yml
       - run: uv sync --locked
       - name: Format only new code and run regressions
         run: |
@@ -96,16 +91,16 @@ jobs:
           uv run --locked ruff check scripts/check_runtime_lock.py scripts/smoke_runtime_http.py tests/test_locked_build.py --fix
           uv run --locked ruff check .
           uv run --locked pytest -q
-      - name: Commit the prepared files to the feature branch only
+      - name: Commit code and documentation to the feature branch only
         shell: bash
         run: |
           set -euo pipefail
           test "$GITHUB_REF" = refs/heads/agent/locked-production-build
           test "$(git ls-remote origin refs/heads/agent/locked-production-build | cut -f1)" = "$GITHUB_SHA"
-          git diff --exit-code -- uv.lock pyproject.toml app railway.json
+          git diff --exit-code -- uv.lock pyproject.toml app railway.json .github
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add AGENTS.md README.md scripts/check_runtime_lock.py scripts/smoke_runtime_http.py tests/test_locked_build.py .github/workflows/python-tests.yml .github/workflows/locked-build-prep.yml
+          git add AGENTS.md README.md scripts/check_runtime_lock.py scripts/smoke_runtime_http.py tests/test_locked_build.py
           git diff --cached --check
           git commit -m 'Document locked production contract and format verification checks'
           git push origin HEAD:refs/heads/agent/locked-production-build
