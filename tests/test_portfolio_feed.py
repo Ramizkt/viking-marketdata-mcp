@@ -9,7 +9,7 @@ from mcp.shared.memory import create_connected_server_and_client_session
 from app import feed_tools
 from app.credentials import VikingCredentials
 from app.oauth import OAUTH_SCOPE
-from app.portfolio_feed import PortfolioFeedManager
+from app.portfolio_feed import PortfolioFeedError, PortfolioFeedManager
 from app.viking_client import VikingAPIError, VikingProtocolError
 
 OWNER = ("client", "credential-fingerprint")
@@ -58,6 +58,21 @@ class FakeClient:
         self.queues[sid].put_nowait({
             "ts": 1780000000000000101, "r": result, "value": value, "deleted": deleted,
         })
+
+
+class GatedClient(FakeClient):
+    def __init__(self, *portfolios):
+        super().__init__()
+        self.gates = {name: asyncio.Event() for name in portfolios}
+        self.entered = {name: asyncio.Event() for name in portfolios}
+        self.attempts = []
+
+    async def subscribe_portfolio(self, *, robot_id, portfolio):
+        self.attempts.append((robot_id, portfolio))
+        if portfolio in self.gates:
+            self.entered[portfolio].set()
+            await self.gates[portfolio].wait()
+        return await super().subscribe_portfolio(robot_id=robot_id, portfolio=portfolio)
 
 
 @pytest.fixture
@@ -408,6 +423,211 @@ async def test_pending_open_does_not_block_renew_or_release_reserved_hub(manager
         await pending
     assert not manager._hubs and not client.subscriptions
     assert client.closes == ["private-1"]
+
+
+async def test_slow_open_does_not_block_another_owner(manager):
+    slow = GatedClient("p")
+    pending = asyncio.create_task(opened(manager, slow))
+    await asyncio.wait_for(slow.entered["p"].wait(), 1)
+    fast = FakeClient()
+    other = await asyncio.wait_for(manager.open(
+        ("other-client", "other-fingerprint"), fast, [("1", "p")], expires_at=time.time() + 300,
+    ), 1)
+    assert other["items"][0]["portfolio"] == "p" and not pending.done()
+    slow.gates["p"].set()
+    first = await asyncio.wait_for(pending, 1)
+    assert first["items"][0]["stream_id"] != other["items"][0]["stream_id"]
+    assert slow.attempts == fast.opens == [("1", "p")]
+
+
+async def start_shared_open(manager, client, targets=None):
+    started = asyncio.Event()
+
+    async def run():
+        started.set()
+        return await opened(manager, client, targets)
+
+    task = asyncio.create_task(run())
+    await asyncio.wait_for(started.wait(), 1)
+    return task
+
+
+async def test_concurrent_identical_opens_share_initialization_and_consumer(manager):
+    client = GatedClient("p")
+    first = asyncio.create_task(opened(manager, client))
+    await asyncio.wait_for(client.entered["p"].wait(), 1)
+    second = await start_shared_open(manager, client)
+    hub = next(iter(manager._hubs.values()))
+    assert hub.refs == 2
+    assert client.attempts == [("1", "p")]
+    client.gates["p"].set()
+    one, two = await asyncio.wait_for(asyncio.gather(first, second), 1)
+    assert one["feed_id"] != two["feed_id"]
+    assert one["items"] == two["items"]
+    assert client.opens == [("1", "p")]
+    client.emit("p", {"pos": 8})
+    first_read = await manager.read(OWNER, one["feed_id"], cursors(one), wait_seconds=1)
+    second_read = await manager.read(OWNER, two["feed_id"], cursors(two), wait_seconds=0)
+    assert first_read["items"] == second_read["items"]
+
+
+@pytest.mark.parametrize("cancel_first", [True, False])
+async def test_cancelling_one_waiter_preserves_shared_initialization(manager, cancel_first):
+    client = GatedClient("p")
+    first = asyncio.create_task(opened(manager, client))
+    await asyncio.wait_for(client.entered["p"].wait(), 1)
+    second = await start_shared_open(manager, client)
+    cancelled, survivor = (first, second) if cancel_first else (second, first)
+    hub = next(iter(manager._hubs.values()))
+    assert hub.refs == 2
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    assert hub.refs == 1 and not hub.initialization.done()
+    assert not client.closes
+    client.gates["p"].set()
+    feed = await asyncio.wait_for(survivor, 1)
+    assert client.attempts == [("1", "p")]
+    assert not manager._pending
+    await manager.close_feed(OWNER, feed["feed_id"])
+    assert not client.subscriptions and client.closes == ["private-1"]
+
+
+async def test_timed_out_waiter_does_not_cancel_another_waiters_initialization(manager):
+    client = GatedClient("p")
+    first = asyncio.create_task(manager.open(
+        OWNER, client, [("1", "p")], expires_at=time.time() + 0.1,
+    ))
+    await asyncio.wait_for(client.entered["p"].wait(), 1)
+    second = await start_shared_open(manager, client)
+    with pytest.raises(TimeoutError):
+        await first
+    hub = next(iter(manager._hubs.values()))
+    assert hub.refs == 1 and not hub.initialization.done()
+    client.gates["p"].set()
+    await asyncio.wait_for(second, 1)
+    assert client.attempts == [("1", "p")]
+
+
+async def test_failed_partial_open_releases_only_its_reservations(manager):
+    client = GatedClient("shared", "denied")
+    client.fail_portfolio = "denied"
+    failed = asyncio.create_task(opened(
+        manager, client, [("1", "shared"), ("1", "good"), ("1", "denied")],
+    ))
+    await asyncio.wait_for(client.entered["denied"].wait(), 1)
+    await asyncio.wait_for(client.entered["shared"].wait(), 1)
+    survivor = await start_shared_open(manager, client, [("1", "shared")])
+    shared = manager._hubs[(OWNER[1], "1", "shared")]
+    assert shared.refs == 2
+    client.gates["denied"].set()
+    with pytest.raises(VikingAPIError):
+        await asyncio.wait_for(failed, 1)
+    assert list(manager._hubs.values()) == [shared]
+    assert shared.refs == 1 and not shared.initialization.done()
+    assert not client.subscriptions and client.closes == ["private-1"]
+    client.gates["shared"].set()
+    feed = await asyncio.wait_for(survivor, 1)
+    assert feed["items"][0]["portfolio"] == "shared"
+    assert client.attempts.count(("1", "shared")) == 1
+
+
+async def test_pending_opens_reserve_owner_capacity_and_cancel_releases_it(manager):
+    manager.max_feeds_per_owner = 1
+    client = GatedClient("p")
+    pending = asyncio.create_task(opened(manager, client))
+    await asyncio.wait_for(client.entered["p"].wait(), 1)
+    with pytest.raises(PortfolioFeedError) as caught:
+        await asyncio.wait_for(opened(manager, client, [("1", "other")]), 1)
+    assert caught.value.code == "capacity_exceeded"
+    assert client.attempts == [("1", "p")]
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert not manager._pending and not manager._hubs
+    await opened(manager, client, [("1", "other")])
+
+
+async def test_slow_unsubscribe_does_not_block_another_owner(manager):
+    slow = FakeClient()
+    feed = await opened(manager, slow)
+    unsubscribe = slow.unsubscribe_portfolio
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_unsubscribe(sid):
+        entered.set()
+        await release.wait()
+        await unsubscribe(sid)
+
+    slow.unsubscribe_portfolio = slow_unsubscribe
+    closing = asyncio.create_task(manager.close_feed(OWNER, feed["feed_id"]))
+    await asyncio.wait_for(entered.wait(), 1)
+    try:
+        await asyncio.wait_for(manager.open(
+            ("other-client", "other-fingerprint"), FakeClient(), [("1", "p")],
+            expires_at=time.time() + 300,
+        ), 1)
+        assert not closing.done()
+    finally:
+        release.set()
+    await asyncio.wait_for(closing, 1)
+
+
+async def test_double_cancellation_keeps_cleanup_owned_until_shutdown(manager):
+    client = GatedClient("slow")
+    unsubscribe = client.unsubscribe_portfolio
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_unsubscribe(sid):
+        entered.set()
+        await release.wait()
+        await unsubscribe(sid)
+
+    client.unsubscribe_portfolio = slow_unsubscribe
+    pending = asyncio.create_task(opened(manager, client, [("1", "good"), ("1", "slow")]))
+    await asyncio.wait_for(client.entered["slow"].wait(), 1)
+    pending.cancel()
+    await asyncio.wait_for(entered.wait(), 1)
+    try:
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert manager._disposals and client.subscriptions
+        assert not manager._pending and not manager._feeds and not manager._hubs
+    finally:
+        release.set()
+    await asyncio.wait_for(manager.close(), 1)
+    assert not manager._disposals and not client.subscriptions
+    assert client.closes == ["private-1"]
+
+
+@pytest.mark.parametrize("late_success", [False, True])
+async def test_shutdown_drains_pending_initializations_without_installing_a_feed(manager, late_success):
+    client = GatedClient("slow")
+    subscribe = client.subscribe_portfolio
+
+    async def complete_on_cancel(*, robot_id, portfolio):
+        try:
+            return await subscribe(robot_id=robot_id, portfolio=portfolio)
+        except asyncio.CancelledError:
+            if not late_success:
+                raise
+            return await FakeClient.subscribe_portfolio(client, robot_id=robot_id, portfolio=portfolio)
+
+    client.subscribe_portfolio = complete_on_cancel
+    pending = asyncio.create_task(opened(manager, client, [("1", "good"), ("1", "slow")]))
+    await asyncio.wait_for(client.entered["slow"].wait(), 1)
+    hubs = list(manager._hubs.values())
+    await asyncio.wait_for(manager.close(), 1)
+    result, = await asyncio.gather(pending, return_exceptions=True)
+    assert isinstance(result, (asyncio.CancelledError, ConnectionError))
+    assert not manager._feeds and not manager._pending and not manager._hubs
+    assert not client.subscriptions
+    assert len(client.closes) == (2 if late_success else 1)
+    assert all(hub.refs == 0 and hub.initialization.done() for hub in hubs)
+    assert all(hub.task is None for hub in hubs)
+    with pytest.raises(ConnectionError, match="closed"):
+        await opened(manager, client)
 
 
 async def test_mcp_machine_readable_expiry_and_unknown_feed_errors(tool_context, manager):

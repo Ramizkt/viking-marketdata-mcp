@@ -62,6 +62,7 @@ class _Hub:
     refs: int = 0
     ready: bool = False
     error: Exception | None = None
+    initialization: asyncio.Task[None] | None = None
     task: asyncio.Task[None] | None = None
     journal: deque[tuple[dict[str, Any], int, float]] = field(default_factory=deque)
     journal_bytes: int = 0
@@ -106,12 +107,17 @@ class PortfolioFeedManager:
         self.reconnect_delay = reconnect_delay
         self._hubs: dict[tuple[str, str, str], _Hub] = {}
         self._feeds: dict[str, _Feed] = {}
+        self._pending: dict[str, _Feed] = {}
         self._condition = asyncio.Condition()
         self._lifecycle_lock = asyncio.Lock()
         self._cleanup_task: asyncio.Task[None] | None = None
         self._disposals: set[asyncio.Task[None]] = set()
+        self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
+        if self._closed:
+            raise ConnectionError("Portfolio feed manager is closed")
         if self._cleanup_task is None:
             self._cleanup_task = asyncio.create_task(self._cleanup_loop())
 
@@ -125,6 +131,8 @@ class PortfolioFeedManager:
             raise ValueError("Portfolio identities must not be empty")
         if expires_at <= time.time() or expires_at > time.time() + 301:
             raise ValueError("Feed lease must expire within 300 seconds")
+        if self._closed:
+            raise ConnectionError("Portfolio feed manager is closed")
         if feed_id is not None:
             feed = self._require(feed_id, owner)
             if {(h.key[1], h.key[2]) for h in feed.hubs} != set(targets):
@@ -137,30 +145,35 @@ class PortfolioFeedManager:
             feed.expires_at = expires_at
             return self._opened(feed_id, feed, "renew")
         async with self._lifecycle_lock:
-            if sum(feed.owner == owner for feed in self._feeds.values()) >= self.max_feeds_per_owner:
+            if self._closed:
+                raise ConnectionError("Portfolio feed manager is closed")
+            reservations = sum(feed.owner == owner for feed in self._pending.values())
+            active = sum(feed.owner == owner for feed in self._feeds.values())
+            if active + reservations >= self.max_feeds_per_owner:
                 raise PortfolioFeedError("capacity_exceeded", "Too many active feeds; close unused feeds")
             hubs = []
-            created = []
+            # Bound each open's initial fan-out; unrelated owners never wait on its I/O.
+            semaphore = asyncio.Semaphore(8)
             for robot, portfolio in targets:
                 key = (owner[1], robot, portfolio)
                 hub = self._hubs.get(key)
                 if hub is None or hub.deleted or hub.error is not None:
                     hub = _Hub(key, client)
                     self._hubs[key] = hub
-                    created.append(hub)
+                    hub.initialization = asyncio.create_task(self._initialize(hub, semaphore))
                 hubs.append(hub)
                 hub.refs += 1  # Reserve during setup, so another lease can safely close/expire.
-            # Bound initial fan-out while retaining the one-WS-per-credentials pool.
-            semaphore = asyncio.Semaphore(8)
+            feed_id = uuid.uuid4().hex
+            feed = _Feed(owner, hubs, expires_at)
+            self._pending[feed_id] = feed
 
-            async def initialize(hub: _Hub) -> None:
-                async with semaphore:
-                    await self._subscribe(hub)
-
-            tasks = [asyncio.create_task(initialize(hub)) for hub in created]
-            try:
-                if tasks:
-                    await asyncio.wait_for(asyncio.gather(*tasks), max(0, expires_at - time.time()))
+        # Each waiter owns only its reservation, not the shared initialization task.
+        waiters = [asyncio.shield(hub.initialization) for hub in hubs if hub.initialization is not None]
+        try:
+            await asyncio.wait_for(asyncio.gather(*waiters), max(0, expires_at - time.time()))
+            async with self._lifecycle_lock:
+                if self._closed:
+                    raise ConnectionError("Portfolio feed manager is closed")
                 if expires_at <= time.time():
                     raise ValueError("Feed lease expired during subscription setup")
                 for hub in hubs:
@@ -168,26 +181,28 @@ class PortfolioFeedManager:
                         raise hub.error
                     if not hub.ready:
                         raise ConnectionError("Portfolio feed is reconnecting; retry open")
-                feed_id = uuid.uuid4().hex
-                feed = _Feed(owner, hubs, expires_at)
+                self._pending.pop(feed_id)
                 self._feeds[feed_id] = feed
                 for hub in hubs:
                     if hub.task is None and not hub.deleted:
                         hub.task = asyncio.create_task(self._consume(hub))
                 return self._opened(feed_id, feed, "initial")
-            except BaseException:
-                for task in tasks:
-                    task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-                unused = []
-                for hub in hubs:
-                    hub.refs -= 1
-                    if not hub.refs:
-                        if self._hubs.get(hub.key) is hub:
-                            self._hubs.pop(hub.key, None)
-                        unused.append(hub)
-                await asyncio.gather(*(self._dispose(hub) for hub in unused))
-                raise
+        except BaseException:
+            # Cleanup survives a second caller cancellation and is joined by shutdown.
+            cleanup = self._track_disposal(asyncio.create_task(self._release(feed_id, pending=True)))
+            await asyncio.shield(cleanup)
+            raise
+        finally:
+            for waiter in waiters:
+                waiter.cancel()
+
+    async def _initialize(self, hub: _Hub, semaphore: asyncio.Semaphore) -> None:
+        try:
+            async with semaphore:
+                await self._subscribe(hub)
+        except Exception as exc:
+            hub.error = exc
+            raise
 
     def _opened(self, feed_id: str, feed: _Feed, reason: str) -> dict[str, Any]:
         return self._response(feed_id, feed, [
@@ -355,23 +370,36 @@ class PortfolioFeedManager:
         await self._release(feed_id)
         return {"feed_id": feed_id, "closed": True}
 
-    async def _release(self, feed_id: str) -> None:
-        feed = self._feeds.pop(feed_id, None)
-        if feed is None:
-            return
-        unused = []
-        for hub in feed.hubs:
+    def _drop_refs(self, hubs: list[_Hub]) -> list[asyncio.Task[None]]:
+        """Release references and register cleanup while holding the registry lock."""
+        tasks = []
+        for hub in hubs:
             hub.refs -= 1
             if not hub.refs:
                 if self._hubs.get(hub.key) is hub:
                     self._hubs.pop(hub.key, None)
-                unused.append(hub)
+                tasks.append(self._track_disposal(asyncio.create_task(self._dispose(hub))))
+        return tasks
+
+    def _track_disposal(self, task: asyncio.Task[None]) -> asyncio.Task[None]:
+        self._disposals.add(task)
+
+        def completed(task: asyncio.Task[None]) -> None:
+            self._disposals.discard(task)
+            if not task.cancelled():
+                task.exception()  # Retrieve even if the cleanup's caller was cancelled again.
+
+        task.add_done_callback(completed)
+        return task
+
+    async def _release(self, feed_id: str, *, pending: bool = False) -> None:
+        async with self._lifecycle_lock:
+            feed = (self._pending if pending else self._feeds).pop(feed_id, None)
+            if feed is None:
+                return
+            tasks = self._drop_refs(feed.hubs)
         async with self._condition:
             self._condition.notify_all()
-        tasks = [asyncio.create_task(self._dispose(hub)) for hub in unused]
-        for task in tasks:
-            self._disposals.add(task)
-            task.add_done_callback(self._disposals.discard)
         if tasks:
             await asyncio.shield(asyncio.gather(*tasks))
 
@@ -385,9 +413,10 @@ class PortfolioFeedManager:
             hub.subscription_id = None
 
     async def _dispose(self, hub: _Hub) -> None:
-        if hub.task:
-            hub.task.cancel()
-            await asyncio.gather(hub.task, return_exceptions=True)
+        tasks = [task for task in (hub.initialization, hub.task) if task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         await self._unsubscribe(hub)
 
     async def _cleanup_loop(self) -> None:
@@ -397,12 +426,27 @@ class PortfolioFeedManager:
             await asyncio.gather(*(self._release(feed_id) for feed_id in expired))
 
     async def close(self) -> None:
-        if self._cleanup_task:
-            self._cleanup_task.cancel()
-            await asyncio.gather(self._cleanup_task, return_exceptions=True)
-            self._cleanup_task = None
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        await asyncio.shield(self._close_task)
+
+    async def _close(self) -> None:
         async with self._lifecycle_lock:
-            for feed_id in list(self._feeds):
-                await self._release(feed_id)
-        if self._disposals:
-            await asyncio.gather(*self._disposals, return_exceptions=True)
+            self._closed = True
+            cleanup = self._cleanup_task
+            self._cleanup_task = None
+            feeds = [*self._feeds.values(), *self._pending.values()]
+            self._feeds.clear()
+            self._pending.clear()
+            for feed in feeds:
+                self._drop_refs(feed.hubs)
+        async with self._condition:
+            self._condition.notify_all()
+        if cleanup:
+            cleanup.cancel()
+            await asyncio.gather(cleanup, return_exceptions=True)
+        while self._disposals:
+            tasks = tuple(self._disposals)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            # Gathering already-finished tasks need not yield to their done callbacks.
+            self._disposals.difference_update(tasks)

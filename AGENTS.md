@@ -384,6 +384,32 @@ Robot IDs передавать decimal string до 20 символов; числ
 только в safe JSON integer range. Patch merge рекурсивный, unknown fields сохраняются,
 `__action=del` удаляет ключ, snapshot заменяет всё состояние. Тесты —
 `tests/test_portfolio_feed.py`, плюс прежняя полная regression suite.
+Registry/refcounts и резервирование capacity меняются под короткой lifecycle
+блокировкой; ожидание Viking и unsubscribe выполняются вне неё. Один hub имеет
+общую initial task: отмена одного открывающего клиента не отменяет инициализацию,
+если на неё ещё есть другие ссылки. Pending opens учитываются в capacity;
+shutdown не допускает поздней регистрации feed.
+
+Отмена `_subscribe` не должна закрывать общий credential WebSocket. Если запрос
+уже отправлен, сохраняйте correlation с исходным соединением до ответа и затем
+отписывайте только его eid. Viking не гарантирует порядок обработки запросов:
+unsubscribe до ответа на subscribe может оставить orphan. Late response cleanup
+не должен подключаться заново или затрагивать новый generation соединения.
+Ожидающие и отменённые starts имеют общий предел 256 на generation; отменённый
+запрос без ответа сохраняет bounded correlation до late response/disconnect.
+При исчерпании слотов отклонять новые starts, не закрывать общий WebSocket.
+
+Все исходящие WebSocket frames проходят общий limiter на сессию по официальному
+лимиту 10000 points / 10 seconds: JSON message или group стоит 49, heartbeat — 1.
+Не путать semaphore параллельных initial subscribe с rate limit. Ожидание кредита
+должно освобождать send lock; heartbeat получает резерв. Не обходить limiter через
+библиотечные auto-ping. Write path остаётся single-send: ожидание rate admission
+не разрешает retry и не доказывает, что команда была отправлена. Регрессии клиента
+проверять на реальном `VikingClient` с локальным синтетическим WebSocket, включая
+сохранение legacy-подписки после частичного отказа feed и массовые reconnect.
+Эти сценарии находятся в `tests/test_feed_client_regressions.py` и
+`tests/test_feed_integration.py`; они используют только loopback и синтетические
+credentials. Lifecycle/concurrency ленты проверяется в `tests/test_portfolio_feed.py`.
 Не менять глобальный OAuth revoke ради ленты: remembered self-contained token
 сохраняет прежнюю модель отзыва. Проверки K1 route revision/grant disabled выполняет
 выдающий grant узел; этот MCP не читает внешнюю K1 DB и не гарантирует мгновенный отзыв.
