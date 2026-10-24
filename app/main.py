@@ -25,8 +25,10 @@ from app.auth_compat import (
 )
 from app.config import get_settings
 from app.export_store import ExportStore
+from app.feed_tools import register_feed_tools
 from app.oauth import OAUTH_SCOPE, PORTFOLIO_WRITE_SCOPE, VikingOAuthProvider
 from app.onboarding import setup_page
+from app.portfolio_feed import PortfolioFeedManager
 from app.portfolio_tools import register_portfolio_control_tools
 from app.service import Aggregation, Delivery, MarketDataService
 from app.viking_client import VikingAPIError, VikingClientPool, VikingProtocolError
@@ -41,6 +43,7 @@ settings = get_settings()
 viking_clients = VikingClientPool(settings)
 export_store = ExportStore(settings)
 oauth_provider = VikingOAuthProvider(settings)
+portfolio_feeds = PortfolioFeedManager()
 
 issuer_url = AnyHttpUrl(settings.resolved_public_base_url)
 resource_url = AnyHttpUrl(f"{settings.resolved_public_base_url}/mcp")
@@ -198,6 +201,7 @@ def _service_for_request() -> MarketDataService:
 register_portfolio_control_tools(
     mcp, settings=settings, service_factory=lambda: _service_for_request()
 )
+register_feed_tools(mcp, manager=portfolio_feeds, provider=oauth_provider, clients=viking_clients)
 
 
 @mcp.tool(
@@ -1653,7 +1657,11 @@ async def lifespan(_: Starlette):
     async with mcp.session_manager.run():
         viking_clients.start()
         oauth_provider.start()
-        yield
+        portfolio_feeds.start()
+        try:
+            yield
+        finally:
+            await portfolio_feeds.close()
     await oauth_provider.close()
     await viking_clients.close()
 

@@ -3,7 +3,7 @@
 Публичный MCP-сервер поверх WebSocket API `bot.fkviking.com`: чтение данных и
 отдельно разрешаемые операции изменения пользовательских полей и остановки портфелей.
 
-Он предоставляет 56 инструментов:
+Он предоставляет 59 инструментов:
 
 - `get_authorization_status` — текущие права подключения без запроса к Viking;
 - `update_portfolio_user_fields` — частичное изменение `uf0`–`uf19`;
@@ -20,6 +20,9 @@
 - `subscribe_portfolio` — подписка на все изменения выбранного портфеля;
 - `get_portfolio_updates` — чтение обновлений полей портфеля и его инструментов;
 - `unsubscribe_portfolio` — явное завершение подписки на портфель;
+- `open_portfolio_feed` — общий consumer и snapshots заданного набора портфелей;
+- `read_portfolio_feed` — недеструктивный multiplex replay по отдельным cursors;
+- `close_portfolio_feed` — завершение собственной lease ленты ([контракт](docs/portfolio-feed.md));
 - `subscribe_portfolio_logs` — подписка на новые записи логов портфеля;
 - `get_portfolio_log_updates` — чтение накопленных логов портфеля;
 - `unsubscribe_portfolio_logs` — завершение подписки на логи портфеля;
