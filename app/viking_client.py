@@ -6,7 +6,8 @@ import json
 import logging
 import uuid
 import zlib
-from collections.abc import Iterable
+from collections import deque
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from time import monotonic
 from typing import Any
@@ -38,6 +39,59 @@ class VikingAPIError(RuntimeError):
 
 class VikingProtocolError(RuntimeError):
     """Malformed or unexpected response returned by the Viking API."""
+
+
+class VikingRequestNotSent(ConnectionError):
+    """Admission/transport failed before invoking the WebSocket send operation."""
+
+    def __init__(self, cause: Exception):
+        super().__init__("Viking request was not sent")
+        self.cause = cause
+
+
+class VikingSendCancelled(asyncio.CancelledError):
+    def __init__(self, *, request_sent: bool):
+        super().__init__("Viking request cancelled")
+        self.request_sent = request_sent
+
+
+@dataclass
+class _SendAttempt:
+    task: asyncio.Task[None] | None = None
+
+
+@dataclass
+class _AbandonedSubscription:
+    ws: ClientConnection
+    message_type: str
+    future: asyncio.Future[dict[str, Any]]
+    send: _SendAttempt
+    waiting: bool = False
+
+
+class _OutboundWindow:
+    # api.md: 10000 points / 10 one-second buckets, JSON/group=49, heartbeat=1.
+    # Eleven continuous seconds is conservative across unknown server bucket boundaries.
+    window_seconds = 11.0
+    capacity = 10_000
+    heartbeat_reserve = 10
+
+    def __init__(self):
+        self.events: deque[tuple[float, int]] = deque()
+        self.points = 0
+
+    def delay(self, now: float, weight: int) -> float:
+        while self.events and self.events[0][0] <= now - self.window_seconds:
+            _, old_weight = self.events.popleft()
+            self.points -= old_weight
+        limit = self.capacity if weight == 1 else self.capacity - self.heartbeat_reserve
+        if self.points + weight <= limit:
+            return 0
+        return max(0, self.events[0][0] + self.window_seconds - now)
+
+    def record(self, now: float, weight: int) -> None:
+        self.events.append((now, weight))
+        self.points += weight
 
 
 @dataclass
@@ -116,6 +170,7 @@ class VikingClient:
         self.settings = settings
         self.credentials = credentials
         self._ws: ClientConnection | None = None
+        self._authorized_ws: ClientConnection | None = None
         self._connect_lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
         self._portfolio_control_lock = asyncio.Lock()
@@ -124,10 +179,20 @@ class VikingClient:
         self._subscriptions: dict[str, _Subscription] = {}
         self._reader_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
+        self._outbound_ws: ClientConnection | None = None
+        self._outbound_window = _OutboundWindow()
+        self._outbound_clock: Callable[[], float] = monotonic
+        self._outbound_sleep = asyncio.sleep
+        self._subscription_starts: set[str] = set()
+        self._abandoned_subscriptions: dict[str, _AbandonedSubscription] = {}
+        self._subscription_cleanup_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def connected(self) -> bool:
-        return self._ws is not None and self._ws.state is State.OPEN
+        return (
+            self._ws is not None and self._ws.state is State.OPEN
+            and getattr(self, "_authorized_ws", self._ws) is self._ws
+        )
 
     async def execute_portfolio_control(
         self, *, robot_id: str, portfolio: str, action: str,
@@ -146,15 +211,24 @@ class VikingClient:
 
     async def close(self) -> None:
         ws, self._ws = self._ws, None
+        self._authorized_ws = None
         current = asyncio.current_task()
         for task in (self._heartbeat_task, self._reader_task):
             if task and task is not current:
                 task.cancel()
         self._heartbeat_task = None
         self._reader_task = None
+        for task in tuple(getattr(self, "_subscription_cleanup_tasks", ())):
+            if task is not current:
+                task.cancel()
+        # Detach old-generation state before yielding: a concurrent reconnect may
+        # register new requests while the old socket finishes its close handshake.
+        self._fail_pending(ConnectionError("Viking WebSocket connection closed"))
+        self._subscriptions.clear()
+        getattr(self, "_subscription_starts", set()).clear()
+        getattr(self, "_abandoned_subscriptions", {}).clear()
         if ws is not None:
             await ws.close()
-        self._fail_pending(ConnectionError("Viking WebSocket connection closed"))
 
     async def request(
         self,
@@ -168,8 +242,10 @@ class VikingClient:
         last_error: BaseException | None = None
 
         for attempt in range(2):
+            ws = None
             try:
                 await self._ensure_connected()
+                ws = self._ws
                 return await self._request_connected(message_type, data or {}, timeout=timeout)
             except (TimeoutError, ConnectionClosed, ConnectionError) as exc:
                 last_error = exc
@@ -179,7 +255,8 @@ class VikingClient:
                     attempt + 1,
                     type(exc).__name__,
                 )
-                await self.close()
+                if ws is not None and self._ws is ws:
+                    await self.close()
 
         assert last_error is not None
         raise ConnectionError(f"Viking API request failed after reconnect: {message_type}") from last_error
@@ -2026,11 +2103,10 @@ class VikingClient:
             records.append((eid, message_type, data, future, payload))
 
         try:
-            async with self._send_lock:
-                payloads = [record[4] for record in records]
-                for offset in range(0, len(payloads), 50):
-                    group = payloads[offset : offset + 50]
-                    await ws.send(json.dumps(group, separators=(",", ":")))
+            payloads = [record[4] for record in records]
+            for offset in range(0, len(payloads), 50):
+                group = payloads[offset : offset + 50]
+                await self._send_frame(ws, json.dumps(group, separators=(",", ":")))
             responses = await asyncio.wait_for(
                 asyncio.gather(*(record[3] for record in records)),
                 timeout=timeout or self.settings.viking_request_timeout_seconds,
@@ -2040,11 +2116,16 @@ class VikingClient:
                 self._pending.pop(eid, None)
                 if register_subscriptions:
                     self._subscriptions.pop(eid, None)
-            await self.close()
+            if self._ws is ws:
+                await self.close()
             raise
         finally:
-            for eid, _, _, _, _ in records:
+            for eid, _, _, future, _ in records:
                 self._pending.pop(eid, None)
+                if not future.done():
+                    future.cancel()
+                elif not future.cancelled():
+                    future.exception()
 
         outcomes: list[tuple[str, dict[str, Any] | VikingAPIError]] = []
         try:
@@ -2065,7 +2146,8 @@ class VikingClient:
                         continue
                 outcomes.append((eid, response))
         except VikingProtocolError:
-            await self.close()
+            if self._ws is ws:
+                await self.close()
             raise
         return outcomes
 
@@ -2079,14 +2161,14 @@ class VikingClient:
             logger.info("Connecting to Viking WebSocket API")
             ws = await connect(
                 self.settings.viking_ws_url,
-                ping_interval=20,
-                ping_timeout=10,
+                ping_interval=None,
                 close_timeout=5,
                 max_size=None,
             )
             self._ws = ws
-            self._reader_task = asyncio.create_task(self._reader_loop(ws))
-            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(ws))
+            heartbeat_ack = asyncio.Event()
+            self._reader_task = asyncio.create_task(self._reader_loop(ws, heartbeat_ack))
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(ws, heartbeat_ack))
 
             try:
                 await self._request_connected(
@@ -2100,10 +2182,60 @@ class VikingClient:
                     },
                     timeout=self.settings.viking_request_timeout_seconds,
                 )
-            except Exception:
-                await self.close()
+            except BaseException:
+                if self._ws is ws:
+                    await self.close()
                 raise
+            if self._ws is not ws or ws.state is not State.OPEN:
+                raise ConnectionError("Viking WebSocket closed during authorization")
+            self._authorized_ws = ws
             logger.info("Viking WebSocket authorization succeeded")
+
+    async def _send_frame(
+        self, ws: ClientConnection, payload: str, *, weight: int = 49,
+        attempt: _SendAttempt | None = None,
+    ) -> None:
+        """Admit every API frame against one connection-wide weighted window.
+
+        Budget waits never own the send lock, so heartbeat can use its reserve.
+        Once send starts it owns the lock until completion even if its caller is cancelled.
+        """
+        while True:
+            await self._send_lock.acquire()
+            handed_off = False
+            try:
+                if self._ws is not ws or ws.state is not State.OPEN:
+                    raise ConnectionError("Viking WebSocket generation is no longer connected")
+                if getattr(self, "_outbound_ws", None) is not ws:
+                    self._outbound_ws = ws
+                    self._outbound_window = _OutboundWindow()
+                now = getattr(self, "_outbound_clock", monotonic)()
+                delay = self._outbound_window.delay(now, weight)
+                if not delay:
+                    self._outbound_window.record(now, weight)
+
+                    async def send_locked() -> None:
+                        try:
+                            await ws.send(payload)
+                        finally:
+                            self._send_lock.release()
+
+                    task = asyncio.create_task(send_locked())
+                    task.add_done_callback(self._consume_task_result)
+                    if attempt is not None:
+                        attempt.task = task
+                    handed_off = True
+                    await asyncio.shield(task)
+                    return
+            finally:
+                if not handed_off:
+                    self._send_lock.release()
+            await getattr(self, "_outbound_sleep", asyncio.sleep)(delay)
+
+    @staticmethod
+    def _consume_task_result(task: asyncio.Future[Any]) -> None:
+        if not task.cancelled():
+            task.exception()
 
     async def _request_connected(
         self,
@@ -2111,23 +2243,37 @@ class VikingClient:
         data: dict[str, Any],
         *,
         timeout: float,
+        _expected_ws: ClientConnection | None = None,
+        _close_on_protocol_error: bool = True,
     ) -> dict[str, Any]:
         ws = self._ws
-        if ws is None or ws.state is not State.OPEN:
-            raise ConnectionError("Viking WebSocket is not connected")
+        if (
+            ws is None or ws.state is not State.OPEN
+            or (_expected_ws is not None and ws is not _expected_ws)
+        ):
+            raise VikingRequestNotSent(ConnectionError("Viking WebSocket is not connected"))
 
         eid = uuid.uuid4().hex
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
         self._pending[eid] = future
         payload = {"type": message_type, "data": data, "eid": eid}
-
+        attempt = _SendAttempt()
         try:
-            async with self._send_lock:
-                await ws.send(json.dumps(payload, separators=(",", ":")))
+            await self._send_frame(ws, json.dumps(payload, separators=(",", ":")), attempt=attempt)
             response = await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.CancelledError as exc:
+            raise VikingSendCancelled(request_sent=attempt.task is not None) from exc
+        except Exception as exc:
+            if attempt.task is None:
+                raise VikingRequestNotSent(exc) from exc
+            raise
         finally:
             self._pending.pop(eid, None)
+            if not future.done():
+                future.cancel()
+            elif not future.cancelled():
+                future.exception()
 
         try:
             self._validate_response_identity(
@@ -2137,13 +2283,15 @@ class VikingClient:
             )
             result = self._required_str(response, "r")
         except VikingProtocolError:
-            await self.close()
+            if _close_on_protocol_error and self._ws is ws:
+                await self.close()
             raise
         if result == "e":
             try:
                 self._raise_api_error(response)
             except VikingProtocolError:
-                await self.close()
+                if _close_on_protocol_error and self._ws is ws:
+                    await self.close()
                 raise
         return response
 
@@ -2158,8 +2306,16 @@ class VikingClient:
         ws = self._ws
         if ws is None or ws.state is not State.OPEN:
             raise ConnectionError("Viking WebSocket is not connected")
-
+        if not hasattr(self, "_subscription_starts"):
+            self._subscription_starts = set()
+            self._abandoned_subscriptions = {}
+            self._subscription_cleanup_tasks = set()
+        # A server that never answers cannot grow cancellation tombstones without bound.
+        # Keep their slots until a late ACK is cleaned up or this connection ends.
+        if len(self._subscription_starts) + len(self._abandoned_subscriptions) >= 256:
+            raise VikingRequestNotSent(RuntimeError("Too many unresolved subscription starts"))
         eid = uuid.uuid4().hex
+        self._subscription_starts.add(eid)
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
         self._pending[eid] = future
@@ -2169,19 +2325,30 @@ class VikingClient:
             request_data=dict(data),
         )
         payload = {"type": message_type, "data": data, "eid": eid}
+        attempt = _SendAttempt()
         try:
-            async with self._send_lock:
-                await ws.send(json.dumps(payload, separators=(",", ":")))
+            await self._send_frame(ws, json.dumps(payload, separators=(",", ":")), attempt=attempt)
             response = await asyncio.wait_for(
-                future,
+                asyncio.shield(future),
                 timeout=timeout or self.settings.viking_request_timeout_seconds,
             )
         except BaseException:
             self._subscriptions.pop(eid, None)
-            await self.close()
+            if attempt.task is not None and self._ws is ws and ws.state is State.OPEN:
+                abandoned = _AbandonedSubscription(ws, message_type, future, attempt)
+                self._abandoned_subscriptions[eid] = abandoned
+                # Retain correlation after caller timeout/cancellation. API requests
+                # may execute out of order: unsubscribe must follow subscribe's ACK.
+                future.add_done_callback(lambda _: self._schedule_subscription_cleanup(eid, abandoned))
             raise
         finally:
-            self._pending.pop(eid, None)
+            self._subscription_starts.discard(eid)
+            if eid not in self._abandoned_subscriptions:
+                self._pending.pop(eid, None)
+                if not future.done():
+                    future.cancel()
+                elif not future.cancelled():
+                    future.exception()
 
         try:
             self._validate_response_identity(
@@ -2192,28 +2359,85 @@ class VikingClient:
             result = self._required_str(response, "r")
         except VikingProtocolError:
             self._subscriptions.pop(eid, None)
-            await self.close()
+            if self._ws is ws:
+                await self.close()
             raise
         if result == "e":
             self._subscriptions.pop(eid, None)
             try:
                 self._raise_api_error(response)
             except VikingProtocolError:
-                await self.close()
+                if self._ws is ws:
+                    await self.close()
                 raise
         return response
 
-    async def _reader_loop(self, ws: ClientConnection) -> None:
+    def _schedule_subscription_cleanup(self, eid: str, abandoned: _AbandonedSubscription) -> None:
+        if self._abandoned_subscriptions.get(eid) is not abandoned or abandoned.waiting:
+            return
+        abandoned.waiting = True
+        task = asyncio.create_task(self._cleanup_subscription(eid, abandoned))
+        self._subscription_cleanup_tasks.add(task)
+        task.add_done_callback(self._subscription_cleanup_tasks.discard)
+        task.add_done_callback(self._consume_task_result)
+
+    async def _cleanup_subscription(self, eid: str, abandoned: _AbandonedSubscription) -> None:
+        """Clean only the abandoned subscription, on its original connection, once ACKed."""
+        remove = False
+        try:
+            if abandoned.future.cancelled() or self._ws is not abandoned.ws:
+                remove = True
+                return
+            response = abandoned.future.result()
+            if abandoned.send.task is not None:
+                await asyncio.shield(abandoned.send.task)
+            self._validate_response_identity(
+                response, expected_type=abandoned.message_type, expected_eid=eid,
+            )
+            result = self._required_str(response, "r")
+            if result == "e" or not abandoned.message_type.endswith(".subscribe"):
+                remove = True
+                return
+            if result not in {"s", "u"}:
+                return
+            unsubscribe_type = abandoned.message_type.removesuffix(".subscribe") + ".unsubscribe"
+            acknowledgement = await self._request_connected(
+                unsubscribe_type,
+                {"sub_eid": eid}, timeout=self.settings.viking_request_timeout_seconds,
+                _expected_ws=abandoned.ws, _close_on_protocol_error=False,
+            )
+            self._parse_plain_response(acknowledgement, unsubscribe_type)
+            remove = True
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # No close/reconnect/retry of the shared socket. Retain the bounded
+            # tombstone if cleanup wasn't acknowledged; generation teardown frees it.
+            logger.debug("Abandoned subscription cleanup did not complete")
+        finally:
+            if remove and self._abandoned_subscriptions.get(eid) is abandoned:
+                self._abandoned_subscriptions.pop(eid, None)
+                self._pending.pop(eid, None)
+
+    async def _reader_loop(
+        self, ws: ClientConnection, heartbeat_ack: asyncio.Event | None = None,
+    ) -> None:
         failure: BaseException = ConnectionError("Viking WebSocket reader stopped")
         try:
             async for raw_message in ws:
+                if self._ws is not ws:
+                    break
                 if raw_message == "7":
+                    if heartbeat_ack is not None:
+                        heartbeat_ack.set()
                     continue
                 for message in self.decode_messages(raw_message):
                     eid = message.get("eid")
                     future = self._pending.get(str(eid)) if eid is not None else None
                     if future is not None and not future.done():
                         future.set_result(message)
+                        continue
+                    if str(eid) in getattr(self, "_abandoned_subscriptions", {}):
                         continue
                     subscription = self._subscriptions.get(str(eid)) if eid is not None else None
                     if subscription is not None:
@@ -2231,21 +2455,37 @@ class VikingClient:
         finally:
             if self._ws is ws:
                 self._ws = None
-            self._fail_pending(failure)
-            self._subscriptions.clear()
+                self._authorized_ws = None
+                self._fail_pending(failure)
+                self._subscriptions.clear()
+                getattr(self, "_subscription_starts", set()).clear()
+                getattr(self, "_abandoned_subscriptions", {}).clear()
 
-    async def _heartbeat_loop(self, ws: ClientConnection) -> None:
+    async def _heartbeat_loop(
+        self, ws: ClientConnection, heartbeat_ack: asyncio.Event | None = None,
+    ) -> None:
         try:
+            next_send = monotonic() + 3
             while ws.state is State.OPEN:
-                await asyncio.sleep(3)
-                async with self._send_lock:
-                    await ws.send("7")
+                await asyncio.sleep(max(0, next_send - monotonic()))
+                if heartbeat_ack is not None:
+                    heartbeat_ack.clear()
+                # Bound send-lock/backpressure separately, preserving the full
+                # documented three-second ACK deadline after the heartbeat is sent.
+                await asyncio.wait_for(self._send_frame(ws, "7", weight=1), timeout=3)
+                next_send = monotonic() + 3
+                if heartbeat_ack is not None:
+                    await asyncio.wait_for(heartbeat_ack.wait(), timeout=3)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.debug("Viking heartbeat stopped", exc_info=True)
+            await ws.close()
 
     def _fail_pending(self, exc: BaseException) -> None:
+        for abandoned in getattr(self, "_abandoned_subscriptions", {}).values():
+            if not abandoned.future.done():
+                abandoned.future.cancel()
         for future in list(self._pending.values()):
             if not future.done():
                 future.set_exception(exc)

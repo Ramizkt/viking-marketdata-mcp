@@ -11,7 +11,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, field_validator, model_validator
 
-from app.viking_client import VikingAPIError, VikingClient, VikingProtocolError
+from app.viking_client import VikingAPIError, VikingClient, VikingProtocolError, VikingRequestNotSent
 
 MAX_TARGETS = 200
 SAFE_NUMBER = (1 << 53) - 1
@@ -199,9 +199,12 @@ async def send_control_once(
                 raise VikingProtocolError("Portfolio write acknowledgement has a different target")
         except VikingAPIError:
             raise
-        except asyncio.CancelledError:
-            with contextlib.suppress(Exception):
-                await client.close()
+        except VikingRequestNotSent as exc:
+            raise WriteNotSent(exc.cause) from exc
+        except asyncio.CancelledError as exc:
+            if getattr(exc, "request_sent", True):
+                with contextlib.suppress(Exception):
+                    await client.close()
             raise
         except Exception as exc:
             with contextlib.suppress(Exception):
